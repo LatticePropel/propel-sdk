@@ -1,0 +1,285 @@
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/META-INF/MANIFEST.MF bundles/org.eclipse.cdt.ui/META-INF/MANIFEST.MF
+--- org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/META-INF/MANIFEST.MF	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.ui/META-INF/MANIFEST.MF	2020-02-28 14:28:14.529599000 +0800
+@@ -128,4 +128,5 @@
+  org.eclipse.tools.templates.ui;bundle-version="[1.1.1,2.0.0)"
+ Bundle-ActivationPolicy: lazy
+ Bundle-RequiredExecutionEnvironment: JavaSE-1.8
++Import-Package: com.lattice.WizardPage
+ Automatic-Module-Name: org.eclipse.cdt.ui
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/plugin.properties bundles/org.eclipse.cdt.ui/plugin.properties
+--- org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/plugin.properties	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.ui/plugin.properties	2020-02-28 14:24:05.471695700 +0800
+@@ -555,8 +555,8 @@
+ CDTproject.desc=Create a new C or C++ project
+ CPPproject=C++ Project
+ CPPproject.desc=Create a new C++ project
+-Cproject=C Project
+-Cproject.desc=Create a new C project
++Cproject=Lattice C Project
++Cproject.desc=Create a new Lattice C project
+ 
+ TemplatePreferencePage.name=Template Default Values
+ Template.Engine.Wizard=template entries contributor
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/plugin.xml bundles/org.eclipse.cdt.ui/plugin.xml
+--- org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/plugin.xml	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.ui/plugin.xml	2020-02-28 14:24:05.487697300 +0800
+@@ -281,6 +281,13 @@
+       </perspectiveExtension>
+       <perspectiveExtension
+             targetID="org.eclipse.cdt.ui.CPerspective">
++         <newWizardShortcut
++               id="org.eclipse.cdt.ui.wizards.NewCWizard1">
++         </newWizardShortcut>
++         <newWizardShortcut
++               id="org.eclipse.cdt.ui.wizards.NewCWizard2">
++         </newWizardShortcut>
++            
+          <perspectiveShortcut
+                id="org.eclipse.debug.ui.DebugPerspective">
+          </perspectiveShortcut>
+@@ -3993,7 +4000,28 @@
+ 	         associatedExtensionId="org.eclipse.cdt.ui.navigator.content"
+ 	         menuGroupId="org.eclipse.cdt.ui.newProject"
+ 	         type="new"
+-	         wizardId="org.eclipse.cdt.ui.wizard.project">
++	         wizardId="org.eclipse.cdt.ui.wizards.NewCWizard1">
++		 <enablement>
++		 	<or>
++	         	<with variable="activeWorkbenchWindow.activePerspective">
++                    <equals
++                          value="org.eclipse.cdt.ui.CPerspective">
++                    </equals>
++	         	</with>
++	         	<instanceof value="org.eclipse.cdt.core.model.ICElement" />	
++		        <and>
++		            <instanceof value="org.eclipse.core.resources.IProject"/>
++		            <test property="org.eclipse.core.resources.projectNature"
++		                  value="org.eclipse.cdt.core.cnature"/>
++		        </and>
++         	</or>
++         </enablement>
++	   </commonWizard>
++	   <commonWizard
++	         associatedExtensionId="org.eclipse.cdt.ui.navigator.content"
++	         menuGroupId="org.eclipse.cdt.ui.newProject"
++	         type="new"
++	         wizardId="org.eclipse.cdt.ui.wizards.NewCWizard2">
+ 		 <enablement>
+ 		 	<or>
+ 	         	<with variable="activeWorkbenchWindow.activePerspective">
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/newui/Messages.java bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/newui/Messages.java
+--- org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/newui/Messages.java	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/newui/Messages.java	2020-02-28 14:24:05.516700200 +0800
+@@ -91,6 +91,8 @@
+ 	public static String CDTMainWizardPage_1;
+ 	public static String CDTMainWizardPage_DefaultProjectCategory;
+ 	public static String CDTMainWizardPage_DefaultProjectType;
++	public static String CDTMainWizardPage_DefaultProjectType_Lattice;
++	public static String CDTMainWizardPage_DefaultProjectType_Rtos;
+ 	public static String CLocationOutputTab_0;
+ 	public static String CLocationSourceTab_0;
+ 	public static String CLocationTab_0;
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/newui/Messages.properties bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/newui/Messages.properties
+--- org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/newui/Messages.properties	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/internal/ui/newui/Messages.properties	2020-02-28 14:24:05.533701900 +0800
+@@ -326,3 +326,5 @@
+ # These defaults must match with properties defined in managed build plugins
+ CDTMainWizardPage_DefaultProjectCategory=Executable
+ CDTMainWizardPage_DefaultProjectType=Empty Project
++CDTMainWizardPage_DefaultProjectType_Lattice=Lattice C Project
++CDTMainWizardPage_DefaultProjectType_Rtos=RTOS C Project
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CDTCommonProjectWizard.java bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CDTCommonProjectWizard.java
+--- org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CDTCommonProjectWizard.java	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CDTCommonProjectWizard.java	2020-03-02 15:41:05.433692800 +0800
+@@ -54,6 +54,8 @@
+ import org.eclipse.ui.wizards.newresource.BasicNewProjectResourceWizard;
+ import org.eclipse.ui.wizards.newresource.BasicNewResourceWizard;
+ 
++import com.lattice.WizardPage.*;
++
+ public abstract class CDTCommonProjectWizard extends BasicNewResourceWizard
+ 		implements IExecutableExtension, IWizardWithMemory, ICDTCommonProjectWizard {
+ 	private static final String PREFIX = "CProjectWizard"; //$NON-NLS-1$
+@@ -64,10 +66,12 @@
+ 
+ 	protected IConfigurationElement fConfigElement;
+ 	protected CDTMainWizardPage fMainPage;
++	protected ImportSysEnvPage  loadXmlPage;
+ 
+ 	protected IProject newProject;
+ 	private String wz_title;
+ 	private String wz_desc;
++	private String wz_xmlFile = null;
+ 
+ 	private boolean existingPath = false;
+ 	private String lastProjectName = null;
+@@ -88,8 +92,32 @@
+ 		wz_desc = desc;
+ 	}
+ 
++	public CDTCommonProjectWizard(String title, String desc, String xmlFile) {
++		this(title,desc);
++		wz_xmlFile = xmlFile;
++	}
++
++	public ImportSysEnvPage getSysEnvPage()
++	{
++		return loadXmlPage;
++	}
++
++	public CDTMainWizardPage getCDTMainPage()
++	{
++		return fMainPage;
++	}
++
+ 	@Override
+ 	public void addPages() {
++		if(wz_xmlFile != null) {
++			loadXmlPage  = new ImportSysEnvPage("Load Xml", wz_xmlFile); //$NON-NLS-1$
++		} else {
++			loadXmlPage  = new ImportSysEnvPage("Load Xml"); //$NON-NLS-1$
++		}
++
++		loadXmlPage.setTitle("Load system and bsp"); //$NON-NLS-1$
++		loadXmlPage.setDescription("Load lattice system environment file and bsp package"); //$NON-NLS-1$
++		addPage(loadXmlPage);
+ 		fMainPage = new CDTMainWizardPage(CUIPlugin.getResourceString(PREFIX));
+ 		fMainPage.setTitle(wz_title);
+ 		fMainPage.setDescription(wz_desc);
+@@ -195,14 +223,22 @@
+ 		if (getProject(fMainPage.isCurrent(), true) == null)
+ 			return false;
+ 		fMainPage.h_selected.postProcess(newProject, needsPost);
++		BasicNewProjectResourceWizard.updatePerspective(fConfigElement);
+ 		try {
++			Thread.sleep(1000);
++		} catch (InterruptedException e1) {
++			// TODO Auto-generated catch block
++			e1.printStackTrace();
++		}
++		try {			
++			newProject.refreshLocal(IResource.DEPTH_INFINITE, null);
+ 			setCreated();
+ 		} catch (CoreException e) {
+ 			e.printStackTrace();
+ 			return false;
+ 		}
+ 		BasicNewProjectResourceWizard.updatePerspective(fConfigElement);
+-		selectAndReveal(newProject);
++		//selectAndReveal(newProject);
+ 		return true;
+ 	}
+ 
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CDTMainWizardPage.java bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CDTMainWizardPage.java
+--- org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CDTMainWizardPage.java	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CDTMainWizardPage.java	2020-03-02 15:43:04.755757900 +0800
+@@ -55,6 +55,8 @@
+ import org.eclipse.swt.widgets.TreeItem;
+ import org.eclipse.ui.dialogs.WizardNewProjectCreationPage;
+ 
++import com.lattice.WizardPage.ImportSysEnvPage;
++
+ public class CDTMainWizardPage extends WizardNewProjectCreationPage implements IWizardItemsListListener {
+ 	public static final String PAGE_ID = "org.eclipse.cdt.managedbuilder.ui.wizard.NewModelProjectWizardPage"; //$NON-NLS-1$
+ 
+@@ -71,6 +73,8 @@
+ 
+ 	public CWizardHandler h_selected;
+ 	private Label categorySelectedLabel;
++	private static boolean isvisible;
++	boolean templateError = false;
+ 
+ 	/**
+ 	 * Creates a new project creation wizard page.
+@@ -80,6 +84,7 @@
+ 	public CDTMainWizardPage(String pageName) {
+ 		super(pageName);
+ 		setPageComplete(false);
++		isvisible = false;
+ 	}
+ 
+ 	@Override
+@@ -117,6 +122,15 @@
+ 				if (tis == null || tis.length == 0)
+ 					return;
+ 				switchTo((CWizardHandler) tis[0].getData(), (EntryDescriptor) tis[0].getData(DESC));
++				templateError = false;
++				if(ImportSysEnvPage.xmlfileName.length() == 0) {
++					TreeItem[] selection = tree.getSelection();
++					TreeItem selectedItem = selection.length > 0 ? selection[0] : null;
++					String selectedLabel = selectedItem != null ? selectedItem.getText() : null;
++					if(selectedLabel.startsWith("Lattice")) {
++						templateError = true;
++					}
++				}
+ 				setPageComplete(validatePage());
+ 			}
+ 		});
+@@ -171,6 +185,12 @@
+ 	@Override
+ 	protected boolean validatePage() {
+ 		setMessage(null);
++		
++		if(templateError == true) {
++			setErrorMessage("No xml file, Lattice C Project can't be selected.");
++			return false;
++		}
++
+ 		if (!super.validatePage())
+ 			return false;
+ 
+@@ -348,8 +368,13 @@
+ 			}
+ 			if (target == null) {
+ 				// Default selection associated with "org.eclipse.cdt.build.core.buildArtefactType.exe" project type
+-				target = findItem(tree, Messages.CDTMainWizardPage_DefaultProjectType,
+-						Messages.CDTMainWizardPage_DefaultProjectCategory);
++				if(ImportSysEnvPage.xmlfileName != "") {
++					target = findItem(tree, Messages.CDTMainWizardPage_DefaultProjectType_Lattice,
++							Messages.CDTMainWizardPage_DefaultProjectCategory);
++				} else {
++					target = findItem(tree, Messages.CDTMainWizardPage_DefaultProjectType,
++							Messages.CDTMainWizardPage_DefaultProjectCategory);
++				}
+ 				if (target == null) {
+ 					CUIPlugin.log(new Status(IStatus.WARNING, CUIPlugin.PLUGIN_ID,
+ 							"Default project not found in New C/C++ Project Wizard")); //$NON-NLS-1$
+@@ -360,7 +385,7 @@
+ 				if (target.getItemCount() != 0)
+ 					target = target.getItem(0);
+ 			}
+-			tree.setSelection(target);
++			if (isvisible) tree.setSelection(target);
+ 			return (CWizardHandler) target.getData();
+ 		}
+ 		return null;
+@@ -525,4 +550,14 @@
+ 	public List<EntryDescriptor> filterItems(List<EntryDescriptor> items) {
+ 		return items;
+ 	}
++
++	@Override
++	public void setVisible(boolean visible) {
++		super.setVisible(visible);
++		isvisible = visible;
++		if (isvisible) {
++			switchTo(updateData(tree, right, showSup, CDTMainWizardPage.this, getWizard()),
++					getDescriptor(tree));
++		}
++	}
+ }
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CProjectWizard.java bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CProjectWizard.java
+--- org.eclipse.cdt-CDT_9_10_0/core/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CProjectWizard.java	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.ui/src/org/eclipse/cdt/ui/wizards/CProjectWizard.java	2020-03-02 15:43:49.520157000 +0800
+@@ -31,6 +31,10 @@
+ 		super(Messages.NewModelProjectWizard_4, Messages.NewModelProjectWizard_5);
+ 	}
+ 
++	public CProjectWizard(String xmlFile) {
++		super(Messages.NewModelProjectWizard_4, Messages.NewModelProjectWizard_5, xmlFile);
++	}
++
+ 	@Override
+ 	public String[] getNatures() {
+ 		return new String[] { CProjectNature.C_NATURE_ID };

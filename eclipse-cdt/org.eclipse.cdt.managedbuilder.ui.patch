@@ -1,0 +1,161 @@
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/build/org.eclipse.cdt.managedbuilder.ui/META-INF/MANIFEST.MF bundles/org.eclipse.cdt.managedbuilder.ui/META-INF/MANIFEST.MF
+--- org.eclipse.cdt-CDT_9_10_0/build/org.eclipse.cdt.managedbuilder.ui/META-INF/MANIFEST.MF	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.managedbuilder.ui/META-INF/MANIFEST.MF	2020-02-28 15:54:12.783365800 +0800
+@@ -26,5 +26,6 @@
+  org.eclipse.core.expressions
+ Bundle-ActivationPolicy: lazy
+ Bundle-RequiredExecutionEnvironment: JavaSE-1.8
+-Import-Package: com.ibm.icu.text
++Import-Package: com.ibm.icu.text,
++ com.lattice.WizardPage
+ Automatic-Module-Name: org.eclipse.cdt.managedbuilder.ui
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/build/org.eclipse.cdt.managedbuilder.ui/src/org/eclipse/cdt/managedbuilder/ui/wizards/MBSCustomPageManager.java bundles/org.eclipse.cdt.managedbuilder.ui/src/org/eclipse/cdt/managedbuilder/ui/wizards/MBSCustomPageManager.java
+--- org.eclipse.cdt-CDT_9_10_0/build/org.eclipse.cdt.managedbuilder.ui/src/org/eclipse/cdt/managedbuilder/ui/wizards/MBSCustomPageManager.java	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.managedbuilder.ui/src/org/eclipse/cdt/managedbuilder/ui/wizards/MBSCustomPageManager.java	2020-02-28 16:01:28.991965800 +0800
+@@ -307,6 +307,9 @@
+ 		if (page == null)
+ 			return false;
+ 
++		if((pageID.indexOf("Cross")) != -1)
++			return false;
++
+ 		if (getPageHideStatus(pageID))
+ 			return false;
+ 
+diff --strip-trailing-cr -ur org.eclipse.cdt-CDT_9_10_0/build/org.eclipse.cdt.managedbuilder.ui/src/org/eclipse/cdt/managedbuilder/ui/wizards/MBSWizardHandler.java bundles/org.eclipse.cdt.managedbuilder.ui/src/org/eclipse/cdt/managedbuilder/ui/wizards/MBSWizardHandler.java
+--- org.eclipse.cdt-CDT_9_10_0/build/org.eclipse.cdt.managedbuilder.ui/src/org/eclipse/cdt/managedbuilder/ui/wizards/MBSWizardHandler.java	2019-12-09 22:26:45.000000000 +0800
++++ bundles/org.eclipse.cdt.managedbuilder.ui/src/org/eclipse/cdt/managedbuilder/ui/wizards/MBSWizardHandler.java	2020-03-02 15:46:09.376157000 +0800
+@@ -74,6 +74,8 @@
+ import org.eclipse.swt.widgets.TableItem;
+ import org.eclipse.ui.dialogs.WizardNewProjectCreationPage;
+ 
++import com.lattice.WizardPage.ImportSysEnvPage;
++
+ /**
+  * This object is created per each Project type
+  *
+@@ -101,6 +103,7 @@
+ 	protected CDTConfigWizardPage fConfigPage;
+ 	private IToolChain[] savedToolChains = null;
+ 	private IWizard wizard;
++	private IWizardPage importXmlPage;
+ 	private IWizardPage newProjectCreationPage;
+ 	//	private EntryDescriptor entryDescriptor = null;
+ 	private EntryInfo entryInfo;
+@@ -327,6 +330,11 @@
+ 		public int getToolChainsCount() {
+ 			return tc_filter().size();
+ 		}
++
++		public String getTemplateId()
++		{
++			return templateId;
++		}
+ 	}
+ 
+ 	public MBSWizardHandler(IProjectType _pt, Composite p, IWizard w) {
+@@ -350,6 +358,10 @@
+ 		if (w != null) {
+ 			wizard = w;
+ 			for (IWizardPage page : w.getPages()) {
++				if (page instanceof ImportSysEnvPage) {
++					importXmlPage = page;
++					continue;
++				}
+ 				if (page instanceof WizardNewProjectCreationPage) {
+ 					newProjectCreationPage = page;
+ 					break;
+@@ -360,6 +372,9 @@
+ 		}
+ 	}
+ 
++	protected IWizardPage getInitialPage(){
++		return importXmlPage;
++	}
+ 	/**
+ 	 * Gets the starting page.
+ 	 *
+@@ -461,6 +476,8 @@
+ 		updatePreferred(preferred);
+ 		loadCustomPages();
+ 		table.setVisible(true);
++
++		setTemplateName();
+ 		parent.layout();
+ 		if (fConfigPage != null)
+ 			fConfigPage.pagesLoaded = false;
+@@ -471,6 +488,19 @@
+ 		// Notify listener, if any.
+ 		if (listener != null)
+ 			listener.toolChainListChanged(table.getSelectionCount());
++
++		setTemplateName();
++	}
++
++	private void setTemplateName()
++	{
++		if(entryInfo.getTemplateId() != null) {
++			MBSCustomPageManager.addPageProperty("org.eclipse.cdt.managedbuilder.ui.wizard.NewModelProjectWizardPage",
++					"template_name", entryInfo.getTemplateId());
++		} else {
++			MBSCustomPageManager.addPageProperty("org.eclipse.cdt.managedbuilder.ui.wizard.NewModelProjectWizardPage",
++					"template_name", "Empty");
++		}
+ 	}
+ 
+ 	private void loadCustomPages() {
+@@ -479,6 +509,7 @@
+ 
+ 		ICDTCommonProjectWizard wz = (ICDTCommonProjectWizard) getWizard();
+ 		MBSCustomPageManager.init();
++		MBSCustomPageManager.addStockPage(getInitialPage(), ImportSysEnvPage.PAGE_ID);
+ 		MBSCustomPageManager.addStockPage(getNewProjectCreationPage(), CDTMainWizardPage.PAGE_ID);
+ 		MBSCustomPageManager.addStockPage(getConfigPage(), CDTConfigWizardPage.PAGE_ID);
+ 
+@@ -650,7 +681,7 @@
+ 		if (entryInfo == null)
+ 			return;
+ 
+-		Template template = entryInfo.getInitializedTemplate(getNewProjectCreationPage(), getConfigPage(),
++		Template template = entryInfo.getInitializedTemplate(getNewProjectCreationPage(), getTCPage(),
+ 				getMainPageData());
+ 		if (template == null)
+ 			return;
+@@ -674,9 +705,22 @@
+ 		return fConfigPage;
+ 	}
+ 
++
++	protected IWizardPage getTCPage() {
++		
++		for (IWizardPage page : MBSCustomPageManager.getCustomPages()) {
++			if (page instanceof MBSCustomPage) {
++				MBSCustomPage mbspage = (MBSCustomPage)page;
++				if (mbspage.getPageID().equals("com.lattice.openwizard.TCSettingWizardPage"))
++					return page;
++			}
++		}
++		return null;
++	}
++
+ 	@Override
+ 	public IWizardPage getSpecificPage() {
+-		return entryInfo.getNextPage(getNewProjectCreationPage(), getConfigPage());
++		return entryInfo.getNextPage(getNewProjectCreationPage(), getTCPage());
+ 	}
+ 
+ 	/**
+@@ -918,10 +962,10 @@
+ 		if (entryInfo == null)
+ 			return false;
+ 
+-		if (!getConfigPage().isCustomPageComplete())
+-			return false;
++		//if (!getConfigPage().isCustomPageComplete())
++		//	return false;
+ 
+-		if (!entryInfo.canFinish(newProjectCreationPage, getConfigPage()))
++		if (!entryInfo.canFinish(newProjectCreationPage, getTCPage()))
+ 			return false;
+ 
+ 		if (customPages != null)
