@@ -1,0 +1,2421 @@
+diff --git a/src/jtag/drivers/Makefile.am b/src/jtag/drivers/Makefile.am
+index 6fe40a61c..e50dc6df5 100644
+--- a/src/jtag/drivers/Makefile.am
++++ b/src/jtag/drivers/Makefile.am
+@@ -81,6 +81,10 @@ if USB_BLASTER_DRIVER
+ %C%_libocdjtagdrivers_la_LIBADD += %D%/usb_blaster/libocdusbblaster.la
+ include %D%/usb_blaster/Makefile.am
+ endif
++if LSCC_USB_CABLESERVER
++%C%_libocdjtagdrivers_la_LIBADD += %D%/lattice_usb_cableserver/liblsccusbcableserver.la
++include %D%/lattice_usb_cableserver/Makefile.am
++endif
+ if FT232R
+ DRIVERFILES += %D%/ft232r.c
+ endif
+diff --git a/src/jtag/drivers/lattice_usb_cableserver/Makefile.am b/src/jtag/drivers/lattice_usb_cableserver/Makefile.am
+new file mode 100644
+index 000000000..35250ffea
+--- /dev/null
++++ b/src/jtag/drivers/lattice_usb_cableserver/Makefile.am
+@@ -0,0 +1,11 @@
++noinst_LTLIBRARIES += %D%/liblsccusbcableserver.la
++%C%_liblsccusbcableserver_la_SOURCES = $(USB_CABLESERVER_SRC)
++%C%_liblsccusbcableserver_la_CPPFLAGS = -I$(top_srcdir)/src/jtag/drivers $(AM_CPPFLAGS) $(LIBUSB1_CFLAGS) $(LIBFTDI_CFLAGS)
++
++USB_CABLESERVER_SRC = %D%/lattice_usb_cableserverclient.c %D%/lscc_cableserver_client.h
++
++if LSCC_USB_CABLESERVER
++USB_CABLESERVER_SRC += %D%/lattice_usb_cableserverclient.c
++endif
++
++liblsccusbcableserver_la_LIBADD = %D%/cableserver_client.lib
+diff --git a/src/jtag/drivers/lattice_usb_cableserver/lattice_usb_cableserverclient.c b/src/jtag/drivers/lattice_usb_cableserver/lattice_usb_cableserverclient.c
+new file mode 100644
+index 000000000..78505cd2e
+--- /dev/null
++++ b/src/jtag/drivers/lattice_usb_cableserver/lattice_usb_cableserverclient.c
+@@ -0,0 +1,2319 @@
++/*
++     >>>>>>>>>>>>>>>>>>>>>>> COPYRIGHT NOTICE <<<<<<<<<<<<<<<<<<<<<<<<<
++     ------------------------------------------------------------------
++     Copyright (c) 2019-2020 by Lattice Semiconductor Corporation
++     ------------------------------------------------------------------
++GNU General Public License & disclaimer:  This program is free software; you can 
++redistribute it and/or modify it under the terms of the GNU General Public License 
++as published by the Free Software Foundation; either version 2 of the License, or 
++(at your option) any later version.  This program is distributed in the hope that it 
++will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty 
++of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU 
++General Public License for more details.  You may access the GNU General Public
++v2 License at https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
++
++LATTICE MAKES NO WARRANTIES ON THIS FILE OR ITS CONTENTS, WHETHER 
++EXPRESSED, IMPLIED, STATUTORY, OR IN ANY PROVISION OF THE LATTICE 
++PROPEL LICENSE AGREEMENT OR COMMUNICATION WITH LICENSEE, AND LATTICE
++SPECIFICALLY DISCLAIMS ANY IMPLIED WARRANTY OF MERCHANTABILITY OR 
++FITNESS FOR A PARTICULAR PURPOSE.  LATTICE DOES NOT WARRANT THAT THE
++FUNCTIONS CONTAINED HEREIN WILL MEET LICENSEE'S REQUIREMENTS, OR THAT
++LICENSEE'S OPERATION OF ANY DEVICE, SOFTWARE OR SYSTEM USING THIS FILE
++OR ITS CONTENTS WILL BE UNINTERRUPTED OR ERROR FREE, OR THAT DEFECTS
++HEREIN WILL BE CORRECTED.  LICENSEE ASSUMES RESPONSIBILITY FOR 
++SELECTION OF MATERIALS TO ACHIEVE ITS INTENDED RESULTS, AND FOR THE 
++PROPER INSTALLATION, USE, AND RESULTS OBTAINED THEREFROM.  LICENSEE 
++ASSUMES THE ENTIRE RISK OF THE FILE AND ITS CONTENTS PROVING DEFECTIVE
++OR FAILING TO PERFORM PROPERLY AND IN SUCH EVENT, LICENSEE SHALL ASSUME
++THE ENTIRE COST AND RISK OF ANY REPAIR, SERVICE, CORRECTION, OR ANY 
++OTHER LIABILITIES OR DAMAGES CAUSED BY OR ASSOCIATED WITH THE 
++SOFTWARE.  IN NO EVENT SHALL LATTICE BE LIABLE TO ANY PARTY FOR DIRECT, 
++INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING 
++LOST PROFITS, ARISING OUT OF THE USE OF THIS FILE OR ITS CONTENTS, EVEN 
++IF LATTICE HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. 
++LATTICE'S SOLE LIABILITY, AND LICENSEE'S SOLE REMEDY, IS SET FORTH ABOVE.
++LATTICE DOES NOT WARRANT OR REPRESENT THAT THIS FILE, ITS CONTENTS OR
++USE THEREOF DOES NOT INFRINGE ON THIRD PARTIES' INTELLECTUAL PROPERTY
++RIGHTS, INCLUDING ANY PATENT. IT IS THE USER'S RESPONSIBILITY TO VERIFY
++THE USER SOFTWARE DESIGN FOR CONSISTENCY AND FUNCTIONALITY THROUGH
++THE USE OF FORMAL SOFTWARE VALIDATION METHODS.
++*/
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <jtag/interface.h>
++#include <jtag/commands.h>
++#include <usb.h>
++#include "helper/binarybuffer.h"
++//#define _WIN32
++#ifdef _WIN32
++#include "tlhelp32.h"
++#else //LIN64
++#include <dlfcn.h>
++#endif
++
++#define SIMULTANEOUSLY_DEBUGGING
++
++
++#define D_QueryCable 1
++#define D_QueryCablePort 2 
++#define D_CheckCable 3 
++#define D_SetCablePort 4 
++#define D_SetTCKDelay 7 // tested
++#define D_ScanDeviceChain 11 
++#define D_GetDeviceList 14 
++#define D_SetTargetDevice 15 
++#define D_GetDeviceID 16
++#define D_JumpState 18 
++#define D_Shift 19 
++#define D_ENDState 20
++#define D_LockCable 33 
++#define D_UnlockCable 34 
++#define D_ReleaseCablePort 35
++#define D_QueryCablewDescription 56
++#ifdef SIMULTANEOUSLY_DEBUGGING
++#define D_UnlockCableNotify 57
++#define D_SetSharableApplications 41
++#endif
++#define D_DISCONNECT 9999
++
++#define jtagTEST_LOGIC_RESET 1
++#define jtagRUN_TEST_IDLE 2
++#define jtagPAUSEIR 3
++#define jtagPAUSEDR 4
++#define jtagSHIFTDR 5
++#define jtagSHIFTIR 6
++
++#define DAISY_CHAIN
++#define MAX_DEVICE_DAISY_CHAIN 10
++#define DC_TARGET_DEVICE 0  //daisy chain target device
++#define DC_DEV_NUM 3  //daisy chain device number
++
++#define ER2_SELECT_CHANNEL_CMD_LEN 3
++
++#define BUFFER_DEFINED
++
++#define WR_BUFF_HEADER_LASTBIT 0x08
++#define WR_BUFF_HEADER_TDR_HDR 0x04
++#define WR_BUFF_HEADER_READ 0x02
++#define WR_BUFF_HEADER_WRITE 0x01
++#define WR_BUFF_HEADER_NA 0x00
++
++#define MAX_BUFFER_SIZE (65535-1)
++
++#define DEV_NONE 0x00
++#define DEV_JEDI 0x01
++#define DEV_XO3D 0x02
++#define DEV_ECP5 0x04
++#define DEV_RAPTOR 0x08
++
++#define JTAG_ID_LEN 4
++#define DEV_FAMILY_NUM 22
++
++typedef int (*client_connect_func)(void* client_handler, char* a_chrHostName, const char* a_chrFileName, const char* a_chrCableServerDir);
++typedef void* (*client_create_func)(char *client_name);
++typedef int (*client_send_func)(void* client_handler, int a_intCmd, ...);
++typedef int (*client_read_func)(void* client_handler,  char p_buffer[10][256], int *dev_num);
++typedef int (*client_read_int_func)(void* client_handler,  int *data);
++//typedef int (*client_read_int_func)(void* client_handler,  int &data);
++typedef int (*client_get_tdo_func)(void* client_handler, char* a_chrTDO, int a_intClock);
++typedef int (*client_get_tdo_unsigned_func)(void* client_handler, unsigned char* a_chrTDO, int a_intClock);
++typedef int (*client_disconnect_func)(void* client_handler);
++
++enum ShiftModes
++{
++    SHI_IR = 0,
++    SHI_DR = 1
++};
++
++enum TdoModes
++{
++    TDO_NO = 0,
++    TDO_YES = 1
++};
++
++struct daisy_chain_device_ctx{
++	unsigned int num;  							
++	unsigned int target; 
++	unsigned int trailer_len;
++	unsigned int header_len;
++	unsigned int TIR_len;
++	unsigned char *TIR_data;
++	unsigned int TDR_len;
++	unsigned char *TDR_data;
++	unsigned int HIR_len;
++	unsigned char* HIR_data;
++	unsigned int HDR_len;
++	unsigned char* HDR_data;
++	char dev_list[MAX_DEVICE_DAISY_CHAIN][256];  	
++};
++
++struct cableserver_client_ctx{
++	void *handle;
++	client_connect_func connect;
++	client_create_func create;
++	client_send_func send;
++	client_read_func read;
++#ifdef SIMULTANEOUSLY_DEBUGGING
++	client_read_int_func read_int;
++#endif
++	client_get_tdo_func get_tdo;
++	client_get_tdo_unsigned_func get_tdo_u;
++	client_disconnect_func disconnect;
++	uint8_t *in_value;
++	unsigned char *write_buffer;
++	unsigned char *read_buffer;
++	unsigned write_size;
++	unsigned read_size;
++	unsigned write_count;
++	unsigned read_count;
++};
++
++static struct cableserver_client_ctx *cableserver_client_ctx;
++static struct daisy_chain_device_ctx *daisy_chain_ctx;
++char *lattice_cable="USB2";
++char *lattice_port="FTUSB-0";
++char *lattice_target_dev="0";
++char *lattice_tck_delay="7";
++char *lattice_channel="NA"; //jtag hub channel select for diffrent core
++
++char *lattice_host_name = "Propel"; //jtagadapter
++char dev_buff[10][256]; //cable list, device list
++char dev_family_config[DEV_FAMILY_NUM][5][100]={
++		//dev name, 			JTAG ID, 			config len, 	channel		family name
++		{"ECP5", 				"113043", 		"21", 		"0",			"ECP5UM5G"},
++		{"LFD2NX-40", 		"0F1043", 		"24", 		"14",		"LFD2NX"},
++		{"XO3D", 			"2E3043", 		"21", 		"0",			"MachXO3D"},
++		{"LFD2NX-17", 		"0F0043", 		"24", 		"14",		"LFD2NX"},
++		{"LFCPNX-100", 		"0x010F4043", 	"24", 		"14",		"LFD2NX"},
++		{"LCMXO2-1200ZE",	"0x012B2043", 	"21",		"0",			"MachXO2"}, //not test
++		{"LCMXO2-7000HC",	"0x012BD043", 	"21",		"0",			"MachXO2"}, //not test
++		{"LCMXO2-7000HE",	"0x012B5043", 	"21",		"0",			"MachXO2"}, //not test
++		{"LCMXO2-7000ZE",	"0x012B5043", 	"21",		"0",			"MachXO2"}, //not test
++		{"LCMXO3L-6900E",	"0x412B5043", 	"21",		"0",			"MachXO3L"},//not test
++		{"LCMXO3L-6900C",	"0x412BD043", 	"21",		"0",			"MachXO3L"},//not test
++		{"LCMXO3L-9400C",	"0x412BE043", 	"21",		"0",			"MachXO3L"},//not test
++		{"LCMXO3D-4300HC",	"0x012E2043", 	"21",		"0",			"MachXO3D"},//not test
++		{"LAMXO3D-4300HC",	"0x012E2043", 	"21",		"0",			"MachXO3D"},//not test
++		{"LCMXO3D-4300ZC",	"0x012E2043", 	"21",		"0",			"MachXO3D"},//not test
++		{"LAMXO3D-4300ZC",	"0x012E2043", 	"21",		"0",			"MachXO3D"},//not test
++		{"LCMXO3D-9400HC",	"0x212E3043", 	"21",		"0",			"MachXO3D"},//not test
++		{"LAMXO3D-9400ZC",	"0x212E3043", 	"21",		"0",			"MachXO3D"},//not test
++		{"LCMXO3D-9400HE",	"0x212E1043", 	"21",		"0",			"MachXO3D"},//not test
++		{"LAMXO3D-9400HE",	"0x212E1043", 	"21",		"0",			"MachXO3D"},//not test
++		{"LCMXO3D-9400ZE",	"0x212E1043", 	"21",		"0",			"MachXO3D_Beta"},//not test
++		{"JTAG-NOP",			"0xFFFFFFFF",		"21",		"0",			"JTAG_NOP"},
++};
++
++
++//#define debug_on
++
++#define BRIDGE_4_BIT_UNIT // SWWA for bridge, it does not support daisy chain, unvalid data will be blocked.
++//#define TAP_SWWA_1027 //2020/10/27 add this swwa, match with FTDI driver
++/***************************************************************************/
++static void flip_array(unsigned char* send_data, unsigned w_header_bitlen){
++	unsigned char tmp=0x00;
++	for (unsigned int k=0; k<((w_header_bitlen+1)/2)/2; k++){
++		tmp=send_data[k];
++		send_data[k]=send_data[(w_header_bitlen+1)/2-1-k];
++		send_data[(w_header_bitlen+1)/2-1-k]=tmp;
++	}
++}
++
++static void extract_bridge_data(unsigned char * p_array, unsigned int bit_len,   //4*bitlen
++		unsigned char* p_ret_array){
++	int i,j=0;
++	unsigned char tmp=0x00;
++	//fprintf(stderr, "p_array, bitlen=%d\n",bit_len/4);
++	//for (int s_i=0; s_i<(bit_len+7)/8; s_i++){
++	//	fprintf(stderr, " 0x%02x", p_array[s_i]);
++	//}
++	//fprintf(stderr, "\n");
++			
++	for (i=((bit_len+7)/8)/4-1, j=0; i>=0;i--,j++){
++		p_ret_array[i]=(p_array[j*4+0]&0x80)|((p_array[j*4+0]&0x08)<<3)
++			|((p_array[j*4+1]&0x80)>>2)|((p_array[j*4+1]&0x08)<<1)
++			|((p_array[j*4+2]&0x80)>>4)|((p_array[j*4+2]&0x08)>>1)
++			|((p_array[j*4+3]&0x80)>>6)|((p_array[j*4+3]&0x08)>>3);
++	}
++
++	switch(bit_len%32){
++		case 0:
++			//covert 4Byte
++			tmp=(p_array[j*4+0]&0x80)|((p_array[j*4+0]&0x08)<<3)
++				|((p_array[j*4+1]&0x80)>>2)|((p_array[j*4+1]&0x08)<<1)
++				|((p_array[j*4+2]&0x80)>>4)|((p_array[j*4+2]&0x08)>>1)
++				|((p_array[j*4+3]&0x80)>>6)|((p_array[j*4+3]&0x08)>>3);
++			p_ret_array[((bit_len+7)/8)/4]=tmp;
++			break;
++		case 4:
++			tmp|=(p_array[j*4+0]&0x08)>>3;
++			p_ret_array[((bit_len+7)/8)/4]=tmp;
++			break;
++		case 8:
++			tmp|=((p_array[j*4+0]&0x80)>>6)|((p_array[j*4+0]&0x08)>>3);
++			p_ret_array[((bit_len+7)/8)/4]=tmp;
++			break;
++		case 12:
++			tmp|=((p_array[j*4+1]&0x80)>>6)|((p_array[j*4+1]&0x08)>>3)
++				|((p_array[j*4+1]&0x08)>>1);
++			p_ret_array[((bit_len+7)/8)/4]=tmp;
++			break;
++		case 16:
++			tmp|=((p_array[j*4+1]&0x80)>>6)|((p_array[j*4+1]&0x08)>>3)
++				|((p_array[j*4+0]&0x80)>>4)|((p_array[j*4+0]&0x08)>>1);
++			p_ret_array[((bit_len+7)/8)/4]=tmp;
++			break;
++		case 20:
++			tmp|=((p_array[j*4+2]&0x80)>>6)|((p_array[j*4+2]&0x08)>>3)
++				|((p_array[j*4+1]&0x80)>>4)|((p_array[j*4+1]&0x08)>>1)
++				|(((p_array[j*4+0]&0x08))<<1);
++			p_ret_array[((bit_len+7)/8)/4]=tmp;
++			break;
++		case 24:
++			tmp|=((p_array[j*4+2]&0x80)>>6)|((p_array[j*4+2]&0x08)>>3)
++				|((p_array[j*4+1]&0x80)>>4)|((p_array[j*4+1]&0x08)>>1)
++				|((p_array[j*4+0]&0x80)>>2)|((p_array[j*4+0]&0x08)<<1);
++			p_ret_array[((bit_len+7)/8)/4]=tmp;
++			break;
++		case 28:
++			tmp|=((p_array[j*4+3]&0x80)>>6)|((p_array[j*4+3]&0x08)>>3)
++				|((p_array[j*4+2]&0x80)>>4)|((p_array[j*4+2]&0x08)>>1)
++				|((p_array[j*4+1]&0x80)>>2)|((p_array[j*4+1]&0x08)<<1)
++				|((p_array[j*4+0]&0x08)<<3);
++			p_ret_array[((bit_len+7)/8)/4]=tmp;
++			break;
++		default:
++			break;
++		
++	}
++}
++#if 0
++unsigned add_header(unsigned char *send_data, unsigned bit_send_len){
++	unsigned trailer_len=daisy_chain_ctx->num-1-daisy_chain_ctx->target;
++	unsigned char *trailer_data=NULL;
++	trailer_data=calloc((trailer_len*4+7)/8,sizeof(unsigned char));
++	memset(trailer_data, 0x33, (trailer_len*4+7)/8);
++	bit_copy(send_data,  bit_send_len*4, trailer_data, 0, trailer_len*4);
++	free(trailer_data);
++	return bit_send_len+trailer_len;
++}
++
++unsigned add_trailer(unsigned char *send_data, unsigned bit_send_len){
++	unsigned header_len=daisy_chain_ctx->num-1-daisy_chain_ctx->target;
++	unsigned char header_data[MAX_BUFFER_SIZE]={0};
++	memset(header_data, 0x33, (header_len*4+7)/8);
++	bit_copy(header_data,  header_len*4, send_data, 0, bit_send_len*4);
++	memcpy(send_data, header_data, ((bit_send_len+header_len)*4+7)/8);
++	return (bit_send_len+header_len);
++}
++#endif
++//bit_len
++int set_header_trailer(int hdr_len, unsigned char* hdr_data, int hir_len, unsigned char* hir_data,
++	int tdr_len, unsigned char* tdr_data, int tir_len, unsigned char* tir_data){
++       daisy_chain_ctx->HDR_len=hdr_len;
++	daisy_chain_ctx->HIR_len=hir_len;
++	daisy_chain_ctx->TDR_len=tdr_len;
++	daisy_chain_ctx->TIR_len=tir_len;
++
++	if (NULL!=daisy_chain_ctx->HDR_data)
++		free(daisy_chain_ctx->HDR_data);
++	if (NULL!=daisy_chain_ctx->HIR_data)
++		free(daisy_chain_ctx->HIR_data);
++	if (NULL!=daisy_chain_ctx->TDR_data)
++		free(daisy_chain_ctx->TDR_data);
++	if(NULL!=daisy_chain_ctx->TIR_data)
++		free(daisy_chain_ctx->TIR_data);
++	if (hdr_len>0){
++		daisy_chain_ctx->HDR_data = calloc((hdr_len+7)/8, sizeof(unsigned char));
++		if (NULL==hdr_data){
++			fprintf(stderr, "ERR: input HDR data error\n");
++			return -1;
++		}else{
++			bit_copy(daisy_chain_ctx->HDR_data, 0, hdr_data, 0, hdr_len);
++		}
++	}
++
++	if (hir_len>0){
++		daisy_chain_ctx->HIR_data = calloc((hir_len+7)/8, sizeof(unsigned char));
++		if (NULL==hir_data){
++			fprintf(stderr, "ERR: input HIR data error\n");
++			return -1;
++		}else{
++			bit_copy(daisy_chain_ctx->HIR_data, 0, hir_data, 0, hir_len);
++		}
++	}
++	if (tdr_len>0){
++		daisy_chain_ctx->TDR_data = calloc((tdr_len+7)/8, sizeof(unsigned char));
++		if(NULL==tdr_data){
++			fprintf(stderr, "ERR: input TDR data error\n");
++			return -1;
++		}else{
++			bit_copy(daisy_chain_ctx->TDR_data, 0, tdr_data, 0, tdr_len);
++		}
++	}
++	if (tir_len>0){
++		daisy_chain_ctx->TIR_data = calloc((tir_len+7)/8, sizeof(unsigned char));
++		if(NULL==tir_data){
++			fprintf(stderr, "ERR: input TIR data error\n");
++			return -1;
++		}else{
++			bit_copy(daisy_chain_ctx->TIR_data, 0, tir_data, 0, tir_len);
++		}
++	}
++	return 0;
++	
++}
++
++ void reset_header_trailer(void){
++	daisy_chain_ctx->HDR_len=0;
++	daisy_chain_ctx->HIR_len=0;
++	daisy_chain_ctx->TDR_len=0;
++	daisy_chain_ctx->TIR_len=0;
++	free(daisy_chain_ctx->HDR_data);
++	free(daisy_chain_ctx->HIR_data);
++	free(daisy_chain_ctx->TDR_data);
++	free(daisy_chain_ctx->TIR_data);
++ }
++
++ //#include <stdio.h>
++  
++#define MSB        0x80
++#define LSB        0x01
++ // extern int gdb_input_flag;
++//shift 1bit
++int bit_left_shift(unsigned char *str, int len){
++	int i;
++	
++	for(i = 1; i <= len; i++){
++		str[i-1] = str[i-1] << 1;
++
++		if(i < len && str[i] & MSB){
++			str[i-1] = str[i-1] | LSB;    
++		}    
++	}
++	return 0;
++}
++
++//shift 1 bit
++int bit_right_shift(unsigned char *str, int len){
++	int i;
++
++	for(i = len-1; i >= 0; i--){
++		str[i] = str[i] >> 1;
++
++		if(i > 0 && str[i-1] & LSB){
++			str[i] = str[i] | MSB;    
++		}    
++	}
++	return 0;    
++}
++#ifdef BRIDGE_4_BIT_UNIT
++void swwa_add_header_bit(unsigned char send_data[MAX_BUFFER_SIZE], 
++	unsigned int bit_len_to_send, unsigned char final_send_data_swwa[MAX_BUFFER_SIZE+1]){
++	unsigned int final_data_len=(bit_len_to_send*4+daisy_chain_ctx->header_len+7)/8;
++	unsigned int send_data_len=(bit_len_to_send*4+7)/8;
++	memset(final_send_data_swwa, 0, MAX_BUFFER_SIZE+1);
++
++	
++	bit_copy(final_send_data_swwa, (final_data_len-send_data_len)*8, send_data, 0, send_data_len*8);
++	#if 0
++	if(gdb_input_flag==1){
++		fprintf(stderr, "before send(bit_len_to_send), daisy_chain_ctx->header_len=%d bit_len_to_send=%d\n",daisy_chain_ctx->header_len, bit_len_to_send);
++
++		fprintf(stderr, "before send(send_data), send_data_len=%d\n",send_data_len);
++		for (int s1_i=0; s1_i<send_data_len; s1_i++){
++			fprintf(stderr, " 0x%02x", send_data[s1_i]);
++		}
++		fprintf(stderr, "\n");
++		
++		
++		fprintf(stderr, "before send(final_send_data_swwa), final_data_len=%d\n",final_data_len);
++		for (int s1_i=0; s1_i<final_data_len; s1_i++){
++			fprintf(stderr, " 0x%02x", final_send_data_swwa[s1_i]);
++		}
++		fprintf(stderr, "\n");
++	}
++	#endif	
++}
++
++#endif
++#ifndef BRIDGE_4_BIT_UNIT
++
++//this is only a SWWA for trailer device, e.g.: xo3d+jedi, jedi is a bridge jtag. so this swwa actually support fix this issue
++static unsigned swwa_add_trailer_header_bit(unsigned char send_data[MAX_BUFFER_SIZE], 
++	unsigned int bit_len_to_send, unsigned char final_send_data[MAX_BUFFER_SIZE+256]){
++#ifdef BRIDGE_4_BIT_UNIT
++	//final_data_len =((bit_len_to_send+daisy_chain_ctx->header_len+daisy_chain_ctx->trailer_len)*4+7)/8;
++	//unsigned int send_data_len=(bit_len_to_send*4+7)/8;
++	unsigned int final_data_len=(bit_len_to_send*4+daisy_chain_ctx->header_len+7)/8;
++	unsigned int send_data_len=(bit_len_to_send*4+7)/8;
++	memset(final_send_data, 0, MAX_BUFFER_SIZE+256);
++
++	bit_copy(final_send_data, (final_data_len-send_data_len)*8, send_data, 0, send_data_len*8);
++		
++	return daisy_chain_ctx->header_len; //(daisy_chain_ctx->header_len+daisy_chain_ctx->trailer_len)*4;
++#else
++	//SWWA for bridge daisy chain, this is the limitation for bridge jtag. since bridge jtag is not a standard jtag
++	//add 3bit in header, add 1bit in trailer, 3bit +XO3D1bit combined 4 bit, shift into jedi, they are considered as unuseful bit.
++	//all trailer should be 0, add bits should be 0
++	unsigned int trailer_bit_len= daisy_chain_ctx->trailer_len;// (4-daisy_chain_ctx->header_len%4)%4;
++	//unsigned char *tmp_data;
++	unsigned int final_data_len=(bit_len_to_send*4+trailer_bit_len+daisy_chain_ctx->header_len+7)/8;
++	unsigned int send_data_len=(bit_len_to_send*4+7)/8;
++	memset(final_send_data, 0, MAX_BUFFER_SIZE+256);
++
++	//tmp_data=calloc(tmp_data_len, sizeof(unsigned char));
++	//step1: add header 3 bit. (suppose the trailer device number =1)
++	//tmp_data is dummy 0
++	//all bits should be zero, to make it disavailble in bridge.
++	#ifdef debug_on
++	fprintf(stderr, "%d trailer bit added\n", trailer_bit_len);
++	fprintf(stderr, "%d header bit added\n", daisy_chain_ctx->header_len);
++
++	//printf send_data
++	printf("debug::\n");
++	printf("final_data_len=%d, send_data_len=%d\n",final_data_len,send_data_len);
++	printf("des offset=%d, src offset=%d, len=%d\n",final_data_len*8-trailer_bit_len-bit_len_to_send*4, send_data_len*8-bit_len_to_send*4, bit_len_to_send*4);
++	#endif
++	memset(final_send_data, 0, MAX_BUFFER_SIZE+256);
++
++#if 1 //TBD:
++	//the max header bit should be 4, so the max num JTAG device in this chain is 4
++	//only keep send data valid, others bits should be set to 0
++
++	memset(final_send_data, 0x00,(MAX_BUFFER_SIZE+256)*sizeof(unsigned char));
++
++	//if ((bit_len_to_send*4)%8 != 0)
++	//	send_data[0]=send_data[0]&0x0F;
++
++	bit_copy(final_send_data, (final_data_len-send_data_len)*8, send_data, 0, send_data_len*8);
++
++#if 0
++	if (final_data_len==send_data_len)
++		bit_copy(final_send_data, 0, send_data, 0, send_data_len*8);
++	else
++		bit_copy(final_send_data, 8, send_data, 0, send_data_len*8);
++#endif
++	
++	
++	//for(int i=0; i<trailer_bit_len; i++){
++//		bit_left_shift(final_send_data, final_data_len);
++//	}
++	
++	//bit_copy(final_send_data, final_data_len*8-trailer_bit_len-bit_len_to_send*4, send_data, send_data_len*8-bit_len_to_send*4, bit_len_to_send*4);
++#else
++	
++	bit_copy(final_send_data, (final_data_len-send_data_len)*8, send_data, 0, send_data_len*8);
++
++	for(int i=0; i<trailer_bit_len; i++){
++		bit_left_shift(final_send_data, final_data_len);
++	}
++#endif
++	
++	//copy to send_data, for next sectionto use
++	//bit_copy(final_send_data, 0, tmp_data, 0, tmp_data_len*8);
++
++	//free(tmp_data);
++
++	return 0;// trailer_bit_len+daisy_chain_ctx->header_len;
++#endif
++}
++#endif
++static unsigned cableserver_buffer_read_space(void){
++	return cableserver_client_ctx->read_size - cableserver_client_ctx->read_count;
++}
++
++static unsigned cableserver_buffer_write_space(void){
++	/* Reserve one byte for SEND_IMMEDIATE */
++	return cableserver_client_ctx->write_size - cableserver_client_ctx->write_count - 1;
++}
++
++static void cableserver_buffer_write_byte(uint8_t data){
++	assert(cableserver_client_ctx->write_count < cableserver_client_ctx->write_size);
++	cableserver_client_ctx->write_buffer[cableserver_client_ctx->write_count++] = data;
++}
++#ifdef BRIDGE_4_BIT_UNIT
++unsigned char last_byte_swwa=0;
++unsigned char bit_last_flag=0;
++unsigned char ir_in_value=0;
++unsigned char cmd_dr_flag=0;
++unsigned char dr_flag=0;
++unsigned char dr_in_value=0;
++unsigned char last_byte_1020=0;  //10/20/2020
++#endif
++
++
++#ifdef SIMULTANEOUSLY_DEBUGGING
++#include "time.h"
++bool cable_locked=false;
++int lockcable(void *handler, bool first){
++
++	clock_t basetime=clock();
++	double total_time=0;
++	int status =0;
++	int times =0;
++	
++	//fprintf(stderr, "basetime=%l\n", basetimer);
++	while(1){
++		total_time=(double)(clock()-basetime)/CLOCKS_PER_SEC;
++		if (total_time*1000>100){ //every 100ms to try to lock cable if failed
++			times++;
++			basetime=clock();
++			if (first){
++				status=cableserver_client_ctx->send(handler, D_SetCablePort, lattice_cable, lattice_port, 9,0,0,1,0,0,0,1,atoi(lattice_tck_delay),0);
++				if (status==0){
++					first=false;
++				}
++			}
++			status= cableserver_client_ctx->send(handler, D_LockCable);
++
++			if (status!=0) //lock failed
++				continue;
++			else{
++				return 0;
++			}
++
++			if (times>50){ //10*100ms, timeout , failed
++				break;
++			}
++		}
++	}
++	return -1; //timeout
++}
++
++int switch_JTAG_hub_channel(void){
++	unsigned char er1_data[1]={0x32};  
++	unsigned char er2_data[1]={0x38};
++	unsigned char enable_nop[2]={0x00, 0x00};
++	//char dev_buff[10][256]; //cable list, device list
++	//int dev_num;
++	//int status;
++	unsigned char *cmd_data; 
++
++	
++	//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagTEST_LOGIC_RESET);
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE);
++
++	cmd_data=calloc(daisy_chain_ctx->num, sizeof(unsigned char));
++
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE);
++
++	//er1 configure
++	//er1 cmd
++	memset(cmd_data, 0xFF, (daisy_chain_ctx->num)*sizeof(unsigned char));
++	cmd_data[daisy_chain_ctx->target]=er1_data[0];
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_IR, 8*(daisy_chain_ctx->num), TDO_NO, cmd_data);
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE);
++	//select channel
++	unsigned char *select_channel_data=NULL;
++	//unsigned char select_channel[ER2_SELECT_CHANNEL_CMD_LEN]={0x00,0x00,0x16};  //default ://selectTCRInstr, ecpENABLE, 21bit   //PROPEL 1.0 CHANNEL 0
++
++	unsigned char select_channel[ER2_SELECT_CHANNEL_CMD_LEN]={0x00,0x00,0x06};  //default ://selectTCRInstr, ecpENABLE, 21bit   //PROPEL 1.0 CHANNEL 0
++	
++	int target_index=0;
++	for (target_index=0; target_index<DEV_FAMILY_NUM; target_index++){
++		if(NULL!= strstr(dev_buff[daisy_chain_ctx->target],  dev_family_config[target_index][1]))
++			break;
++	}
++
++	if (target_index>=DEV_FAMILY_NUM){
++		fprintf(stderr, "Err: can not found the device from device family database, use default value to access this device\n");
++		target_index=DEV_FAMILY_NUM-1;
++	}
++
++	//unsigned data_len=(channel_data_bitlen+daisy_chain_ctx->num-1+7)/8;  //minus self len bit 1
++	
++	unsigned data_len=(atoi(dev_family_config[target_index][2])+daisy_chain_ctx->num-1+7)/8;  //minus self len bit 1
++	//printf("data_len=%d\n", data_len);
++	select_channel_data=calloc(data_len, sizeof(unsigned char));
++	memset(select_channel_data, 0, data_len*sizeof(unsigned char));
++	
++
++
++	if (NULL == strstr(lattice_channel,"NA")){
++		memcpy(dev_family_config[target_index][3], lattice_channel, strlen(lattice_channel));
++		//dev_family_config[target_index][3]=lattice_channel;
++	}
++
++	//char tmp=0xff;
++	//bit_copy(select_channel, 19-atoi(dev_family_config[target_index][3]), &tmp, 0, 1); //set relative bit to 1 to set channel. 00000000 00000000 0000(chnnl 0) 0110
++	if (atoi(dev_family_config[target_index][3])<4)
++		select_channel[2] |= 0x01<<(4+atoi(dev_family_config[target_index][3]));
++
++	if (atoi(dev_family_config[target_index][3])>3 && atoi(dev_family_config[target_index][3])<12)
++		select_channel[1] |= 0x01<<(atoi(dev_family_config[target_index][3])-4);
++
++	if (atoi(dev_family_config[target_index][3])>11 && atoi(dev_family_config[target_index][3])<20)
++		select_channel[0] |= 0x01<<(atoi(dev_family_config[target_index][3])-12);
++
++	//fprintf(stderr,"0x%02x%02x%02x\n", select_channel[0],select_channel[1],select_channel[2]);
++	
++	//bit_copy(select_channel_data, (data_len-ER2_SELECT_CHANNEL_CMD_LEN)*8, select_channel, 0, ER2_SELECT_CHANNEL_CMD_LEN*8);
++	bit_copy(select_channel_data, (data_len-ER2_SELECT_CHANNEL_CMD_LEN)*8, select_channel, 0, ER2_SELECT_CHANNEL_CMD_LEN*8);
++	
++	
++		
++	for(int i=0; i<daisy_chain_ctx->trailer_len; i++){
++		bit_left_shift(select_channel_data, data_len);
++	}
++	//only copy last 3 byte to channel data
++	//bit_copy(select_channel_data, (data_len-ER2_SELECT_CHANNEL_CMD_LEN)*8, select_channel, 0, ER2_SELECT_CHANNEL_CMD_LEN*8);
++
++	//printf("select channel data=0x%02x,%02x,%02x, %02x\n", select_channel_data[0],select_channel_data[1],select_channel_data[2], select_channel_data[3]);
++
++	//there is a bug. single xo3d CHIP should 21 bits
++	//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, channel_data_bitlen+daisy_chain_ctx->num-1, TDO_NO, select_channel_data);
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, atoi(dev_family_config[target_index][2])+daisy_chain_ctx->num-1, TDO_NO, select_channel_data);
++	free(select_channel_data);
++
++	//set nop
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE);
++	memset(cmd_data, 0xFF, (daisy_chain_ctx->num)*sizeof(unsigned char));
++	cmd_data[daisy_chain_ctx->target]=enable_nop[0];
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_IR, 8*(daisy_chain_ctx->num), TDO_NO, enable_nop);
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE);
++
++
++	//enable er2
++	//fprintf(stderr, "num=%d\n",daisy_chain_ctx->num);
++	memset(cmd_data, 0xFF, (daisy_chain_ctx->num)*sizeof(unsigned char));
++	cmd_data[daisy_chain_ctx->target]=er2_data[0];
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_IR, 8*(daisy_chain_ctx->num), TDO_NO, cmd_data);
++	
++	free(cmd_data);
++	return 0;
++}
++
++#endif
++
++
++static int cableserver_buffer_flush(void){
++	uint8_t w_header_flag=0;
++	unsigned w_header_bitlen=0;
++
++	unsigned i=0;
++	unsigned char send_data[MAX_BUFFER_SIZE]={0};
++	#ifndef BRIDGE_4_BIT_UNIT
++	unsigned char final_send_data[MAX_BUFFER_SIZE+256]={0};
++	#endif
++	#ifdef BRIDGE_4_BIT_UNIT
++	unsigned char final_send_data_swwa[MAX_BUFFER_SIZE+1]={0};
++	#endif
++	unsigned char received_data[MAX_BUFFER_SIZE]={0};
++	unsigned char received_data_test[MAX_BUFFER_SIZE+1]={0};
++	bool get_tdo_done=false;
++	unsigned m=0;
++	unsigned last_byte_bit_offset=0;
++	unsigned bit_len_to_send=0;
++	//fprintf(stderr, "jtag flush\n");
++	while(i<cableserver_client_ctx->write_count){
++		w_header_flag=cableserver_client_ctx->write_buffer[i];
++		w_header_bitlen=cableserver_client_ctx->write_buffer[i+2];
++		w_header_bitlen=(w_header_bitlen<<8)&0xFF00;
++		w_header_bitlen|=cableserver_client_ctx->write_buffer[i+1];
++
++		if(w_header_bitlen==0)
++			break;
++		
++		if((w_header_flag&WR_BUFF_HEADER_WRITE)==WR_BUFF_HEADER_WRITE){	
++			if((w_header_flag&WR_BUFF_HEADER_READ)!=WR_BUFF_HEADER_READ){
++				bit_copy(&send_data[m], last_byte_bit_offset, &(cableserver_client_ctx->write_buffer[i+3]), 0, w_header_bitlen*4);
++				bit_len_to_send+=w_header_bitlen;
++				if ((bit_len_to_send%2)==1){
++					last_byte_bit_offset=4;
++					m=(bit_len_to_send+1)/2-1;
++				}else{
++					last_byte_bit_offset=0;
++					m=(bit_len_to_send+1)/2;
++				}
++				i+=(3+(w_header_bitlen+1)/2); 
++			}else{ //before read cmd, send the write cmd, if there are
++				if(bit_len_to_send>0){
++					flip_array(send_data, bit_len_to_send);
++
++				swwa_add_header_bit(send_data, bit_len_to_send, final_send_data_swwa);
++				cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, bit_len_to_send*4+daisy_chain_ctx->header_len, TDO_NO, final_send_data_swwa);
++				
++				memset(send_data, 0, MAX_BUFFER_SIZE);
++
++				}
++				bit_len_to_send=0;
++				
++				//reset parameters, only can have one read cmd, since, when we meet read cmd, we will send it immediately
++				m=0;
++				bit_copy(&send_data[m], 0, &(cableserver_client_ctx->write_buffer[i+3]), 0, w_header_bitlen*4);
++				flip_array(send_data, w_header_bitlen);
++				
++
++			#ifdef debug_on
++					fprintf(stderr, "before send(GET tdo), bitlen=%d\n",w_header_bitlen);
++					for (int s1_i=0; s1_i<(w_header_bitlen*4+7)/8; s1_i++){
++						fprintf(stderr, " 0x%02x", send_data[s1_i]);
++					}
++					fprintf(stderr, "\n");
++			#endif
++				//SWWA FOR XO3D
++
++				swwa_add_header_bit(send_data, w_header_bitlen, final_send_data_swwa);
++
++				cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, w_header_bitlen*4+daisy_chain_ctx->header_len, TDO_YES, final_send_data_swwa);
++				memset(received_data, 0, MAX_BUFFER_SIZE);
++				cableserver_client_ctx->get_tdo_u(cableserver_client_ctx->handle, received_data, w_header_bitlen*4+daisy_chain_ctx->header_len);
++				memset(send_data, 0, MAX_BUFFER_SIZE);
++
++				
++				//#ifdef debug_on
++				#if 0
++				if(gdb_input_flag==1){
++					fprintf(stderr, "get tdo, bitlen=%d\n",w_header_bitlen);
++					for (int r_i=0; r_i<(w_header_bitlen*4+7+daisy_chain_ctx->header_len)/8;r_i++){
++					//for (int r_i=0; r_i<(w_header_bitlen*4+7+addedbit+daisy_chain_ctx->header_len)/8;r_i++){
++						fprintf(stderr, " 0x%02x", received_data[r_i]);
++					}
++					fprintf(stderr, "\n");
++				}
++				#endif
++				memset(received_data_test, 0, MAX_BUFFER_SIZE+1);
++
++
++				unsigned trailer_bit_len=(daisy_chain_ctx->header_len>daisy_chain_ctx->trailer_len) ? daisy_chain_ctx->header_len : daisy_chain_ctx->trailer_len;
++
++				
++				uint8_t tmp_data=0;
++				for (unsigned int lo_i=0; lo_i<(w_header_bitlen*4+7+daisy_chain_ctx->header_len)/8; lo_i++){
++					
++					received_data_test[lo_i]=received_data[lo_i]>>trailer_bit_len;
++					received_data_test[lo_i]&=(0xFF>>trailer_bit_len); //clear to 0,  hight 2 bit
++					received_data_test[lo_i]|=(tmp_data&(0xFF>>(8-trailer_bit_len)))<<(8-trailer_bit_len);
++					tmp_data=received_data[lo_i];
++					
++				}
++					
++				memset(received_data, 0, MAX_BUFFER_SIZE);
++
++				if (daisy_chain_ctx->header_len==1){
++					if(w_header_bitlen%2==0) //for XO3D SWWA
++						memcpy(received_data, &received_data_test[1], ((w_header_bitlen*4+7)/8)*sizeof(unsigned char));
++					else
++						memcpy(received_data, &received_data_test[0], ((w_header_bitlen*4+7)/8)*sizeof(unsigned char));
++				}else{
++					memcpy(received_data, &received_data_test[0], ((w_header_bitlen*4+7)/8)*sizeof(unsigned char));
++				}
++				
++				//#ifdef debug_on
++				#if 0
++				if(gdb_input_flag==1){
++					fprintf(stderr, "get tdo(shifted), bitlen=%d\n",w_header_bitlen);
++					for (int r_i=0; r_i<(w_header_bitlen*4+7)/8;r_i++){
++						fprintf(stderr, " 0x%02x", received_data[r_i]);
++					}
++					fprintf(stderr, "\n");
++				}
++				#endif
++				//#endif
++				i+=(3+(w_header_bitlen+1)/2); 
++				get_tdo_done=true;
++			}
++		}
++	}
++
++	if(bit_len_to_send>0){ 
++		flip_array(send_data, bit_len_to_send);
++
++		swwa_add_header_bit(send_data, bit_len_to_send, final_send_data_swwa);
++		cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, bit_len_to_send*4+daisy_chain_ctx->header_len, TDO_NO, final_send_data_swwa);
++		memset(send_data, 0, MAX_BUFFER_SIZE);
++		bit_len_to_send=0;	
++	}
++	
++	if (get_tdo_done){
++		get_tdo_done=false;
++		unsigned r_bit_offset=0;
++		unsigned r_bit_len=0;
++		r_bit_offset=cableserver_client_ctx->read_buffer[1];
++		r_bit_offset=(r_bit_offset<<8)&0xFF00;
++		r_bit_offset|=cableserver_client_ctx->read_buffer[0];
++		r_bit_len=cableserver_client_ctx->read_buffer[3];
++		r_bit_len=(r_bit_len<<8)&0xFF00;
++		r_bit_len|=cableserver_client_ctx->read_buffer[2];  //not correct
++	
++		if((w_header_flag&WR_BUFF_HEADER_LASTBIT)!=WR_BUFF_HEADER_LASTBIT){
++			unsigned gap=w_header_bitlen-r_bit_len;
++			
++			memset(received_data_test, 0, MAX_BUFFER_SIZE+1);
++
++			#if 0
++			if(gdb_input_flag==1){
++					fprintf(stderr, "==========gap, bitlen=%d\n",gap);
++			}
++			#endif
++			extract_bridge_data((unsigned char *)(&received_data[(gap*4+7)/8]), r_bit_len*4, received_data_test);  //there is a bug for out_offset, only when received multi fields
++			#if 0
++			if(gdb_input_flag==1){
++					fprintf(stderr, "==========in value, bitlen=%d\n",r_bit_len);
++					for (int r_i=0; r_i<(r_bit_len*4+7)/8;r_i++){
++						fprintf(stderr, " 0x%02x", received_data_test[r_i]);
++					}
++					fprintf(stderr, "\n");
++			}
++			#endif
++			bit_copy(cableserver_client_ctx->in_value, 0, received_data_test, 0, r_bit_len);
++			
++		}else{
++
++			int index=0;
++				
++			cableserver_client_ctx->in_value[(r_bit_offset+7)/8-1]|=((received_data[index]&0x08)>>3)<<(r_bit_offset%8);
++			if (ir_in_value){
++				//fprintf(stderr, "last bit r_bit_len=%d\n", r_bit_len);
++				ir_in_value=0;
++				//fprintf(stderr, "cableserver_client_ctx->in_value[%d]=0x%02x\n", (r_bit_offset+7)/8-1, cableserver_client_ctx->in_value[(r_bit_offset+7)/8-1]);
++				cableserver_client_ctx->in_value[(r_bit_offset+7)/8-1]|=0x31;
++			}
++			//#else
++			//	cableserver_client_ctx->in_value[(r_bit_offset+7)/8-1]|=((last_byte_swwa&0x08)>>3)<<(r_bit_offset%8);
++			//#endif
++		}
++		memset(received_data, 0, MAX_BUFFER_SIZE);
++		memset(received_data_test, 0, MAX_BUFFER_SIZE);
++	}
++
++	memset(cableserver_client_ctx->write_buffer, 0, sizeof(unsigned char)*(cableserver_client_ctx->write_size));
++	memset(cableserver_client_ctx->read_buffer, 0, sizeof(unsigned char)*(cableserver_client_ctx->read_size));
++	cableserver_client_ctx->write_count=0;
++	cableserver_client_ctx->read_count=0;
++	return 0;
++	
++}
++
++static unsigned cableserver_buffer_write(const uint8_t *out, unsigned out_offset, unsigned bit_count){
++	memcpy(&(cableserver_client_ctx->write_buffer[cableserver_client_ctx->write_count]), &(out[out_offset/8]), bit_count/8);
++	cableserver_client_ctx->write_count+=bit_count/8;
++	return 0;
++}
++static unsigned  cableserver_buffer_add_read(uint8_t *in,  unsigned in_offset, unsigned bit_count){
++	//[0-1]:bit_offset, [2-3]:bit_count
++	cableserver_client_ctx->in_value=in;
++	cableserver_client_ctx->read_buffer[0]=(in_offset&0xFF);
++	cableserver_client_ctx->read_buffer[1]=(in_offset&0xFF00)>>8;
++	cableserver_client_ctx->read_buffer[2]=(bit_count&0xFF);
++	cableserver_client_ctx->read_buffer[3]=(bit_count&0xFF00)>>8;
++	return bit_count;
++}
++
++
++void cableserver_clock_tms_cs(const uint8_t *out, unsigned out_offset, 
++		uint8_t *in, unsigned in_offset, unsigned length, bool tdi, bool last_bit){
++	//header: 1byte:r/w flag, 2bytes: package length(half byte as length), total,header length=3, bit length*4=byte length, every 1bit=>4bits
++	//byte: 01 write, 02 write/read, 03 read(actually, need to write to shit out data),00:null, read buffer header only have 2 bytes to descripes the length
++	
++	/* Guarantee buffer space enough for a minimum size transfer */
++	if(cableserver_buffer_write_space()<(((length+1)/2)+3) ||(in&&cableserver_buffer_read_space()<(((length+1)/2)+4))){
++		cableserver_buffer_flush();
++	}
++
++	if (length>0){
++		if(((length+1)/2+3)>MAX_BUFFER_SIZE){
++			LOG_ERROR("ERROR::  cableserver buffer overflow!");
++			return;
++		}
++		uint8_t header_flag=WR_BUFF_HEADER_WRITE;
++		header_flag |= last_bit ? WR_BUFF_HEADER_LASTBIT : WR_BUFF_HEADER_NA;
++		header_flag |= in ? WR_BUFF_HEADER_READ : WR_BUFF_HEADER_NA;
++		cableserver_buffer_write_byte(header_flag);  //0x02:r/w, 0x01:w
++		cableserver_buffer_write_byte(length&0xFF);  //data length. hal byte unit=bit_len
++		cableserver_buffer_write_byte((length&0xFF00)>>8);
++	}
++	
++	while(length>0){
++		//byte transfer
++		unsigned this_bits=length;
++		unsigned out_data=*out;
++		if (this_bits>7)
++			this_bits=7;
++		
++		if (this_bits>0){
++			length-=this_bits;
++			unsigned char tmp=0x01; //always the last bit: 1 valid
++			uint8_t data_out=0x00;
++			switch(this_bits%8){
++				case 0:
++					LOG_ERROR("TMS len=0 for JTAG state machine error");
++					break;
++				case 1:
++					data_out=((out_data&0x01)<<2)|tmp;
++					cableserver_buffer_write_byte(data_out|(tdi ? 0x02 : 0x00));
++					break;
++				case 2:
++					data_out=((out_data&0x01)<<2)|tmp;
++					data_out|=((out_data&0x02)<<5)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out|(tdi ? 0x20 : 0x00));
++					break;
++				case 3:
++					data_out=((out_data&0x01)<<2)|tmp;
++					data_out|=((out_data&0x02)<<5)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x04))|(tmp); 
++					cableserver_buffer_write_byte(data_out|(tdi ? 0x02 : 0x00));
++					break;
++				case 4:
++					data_out=((out_data&0x01)<<2)|tmp;
++					data_out|=((out_data&0x02)<<5)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x04))|(tmp);
++					data_out|=((out_data&0x08)<<3)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out|(tdi ? 0x20 : 0x00));
++					break;
++				case 5:
++					data_out=((out_data&0x01)<<2)|tmp;
++					data_out|=((out_data&0x02)<<5)|(tmp<<4);
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x04))|(tmp);
++					data_out|=((out_data&0x08)<<3)|(tmp<<4);
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x10)>>2)|(tmp);
++					cableserver_buffer_write_byte(data_out|(tdi ? 0x02 : 0x00));
++					break;
++				case 6:
++					data_out=((out_data&0x01)<<2)|tmp;
++					data_out|=((out_data&0x02)<<5)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x04))|(tmp);
++					data_out|=((out_data&0x08)<<3)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x10)>>2)|(tmp);
++					data_out|=((out_data&0x20)<<1)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out|(tdi ? 0x20 : 0x00));
++					break;
++				case 7:
++					data_out=((out_data&0x01)<<2)|tmp;
++					data_out|=((out_data&0x02)<<5)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x04))|(tmp); 
++					data_out|=((out_data&0x08)<<3)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x10)>>2)|(tmp); 
++					data_out|=((out_data&0x20)<<1)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x40)>>4)|(tmp);
++					cableserver_buffer_write_byte(data_out|(tdi ? 0x02 : 0x00));
++					break;
++				case 8:
++					data_out=((out_data&0x01)<<2)|tmp;
++					data_out|=((out_data&0x02)<<5)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x04))|(tmp); 
++					data_out|=((out_data&0x08)<<3)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x10)>>2)|(tmp);
++					data_out|=((out_data&0x20)<<1)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out);
++					data_out=((out_data&0x40)>>4)|(tmp); 
++					data_out|=((out_data&0x80)>>1)|(tmp<<4); 
++					cableserver_buffer_write_byte(data_out|(tdi ? 0x20 : 0x00));
++					break;
++				default:
++					LOG_ERROR("LSCC:: TMS len>8 for JTAG state machine error");
++					break;
++	
++			}
++			if(in) {//send immediately
++				cableserver_buffer_add_read(in, in_offset, 1);
++				cableserver_buffer_flush();
++			}
++		}	
++	}
++}
++
++void cableserver_clock_tms_cs_out(const uint8_t *out, unsigned out_offset, 
++		unsigned length, bool tdi){
++	cableserver_clock_tms_cs(out, out_offset, NULL, 0, length, tdi, false);
++}
++
++void cableserver_clock_data(const uint8_t *out, unsigned out_offset, uint8_t *in, 
++		unsigned in_offset, unsigned length, unsigned in_bit_len){
++	unsigned tmp_offset=0;
++	//unsigned local_len=length;
++	/* Guarantee buffer space enough for a minimum size transfer */
++	if(cableserver_buffer_write_space()<(((length+1)/2)+3) ||
++		(in&&cableserver_buffer_read_space()<(((length+1)/2)+4)))
++		cableserver_buffer_flush();
++
++	//add header
++	if (length>0){
++		if(((length+1)/2+3)>MAX_BUFFER_SIZE){
++			LOG_ERROR("ERROR::  cableserver buffer overflow!\n");
++			return;
++		}
++		
++		uint8_t header_flag=WR_BUFF_HEADER_WRITE;
++		header_flag |= in ? WR_BUFF_HEADER_READ : WR_BUFF_HEADER_NA;
++		
++		cableserver_buffer_write_byte( header_flag);  //0x02:r/w, 0x01:w
++		cableserver_buffer_write_byte(length&0xFF);  //data length. hal byte unit=bit_len
++		cableserver_buffer_write_byte((length&0xFF00)>>8);
++	}
++	
++	while(length>0){
++		if(length<8){
++			unsigned char tmp=0x01;
++			unsigned char *out_buff=NULL;
++			out_buff=(unsigned char *)malloc(sizeof(unsigned char)*((length+1)/2));
++			memset(out_buff, 0, sizeof(unsigned char)*((length+1)/2));
++			
++			if(out){
++				switch(length){
++					case 0:
++						break;
++					case 1:
++						out_buff[0]=((out[tmp_offset]&0x01)<<1)|tmp;
++						break;
++					case 2:
++						out_buff[0]=((out[tmp_offset]&0x01)<<1)|tmp;
++						out_buff[0]|=((out[tmp_offset]&0x02)<<4)|(tmp<<4);
++						break;
++					case 3:
++						out_buff[0]=((out[tmp_offset]&0x01)<<1)|tmp;
++						out_buff[0]|=((out[tmp_offset]&0x02)<<4)|(tmp<<4);
++						out_buff[1]=((out[tmp_offset]&0x04)>>1)|(tmp);
++						break;
++					case 4:
++						out_buff[0]=((out[tmp_offset]&0x01)<<1)|tmp;
++						out_buff[0]|=((out[tmp_offset]&0x02)<<4)|(tmp<<4);
++						out_buff[1]=((out[tmp_offset]&0x04)>>1)|(tmp);
++						out_buff[1]|=((out[tmp_offset]&0x08)<<2)|(tmp<<4);
++						break;
++					case 5:
++						out_buff[0]=((out[tmp_offset]&0x01)<<1)|tmp;
++						out_buff[0]|=((out[tmp_offset]&0x02)<<4)|(tmp<<4);
++						out_buff[1]=((out[tmp_offset]&0x04)>>1)|(tmp);
++						out_buff[1]|=((out[tmp_offset]&0x08)<<2)|(tmp<<4);
++						out_buff[2]=((out[tmp_offset]&0x10)>>3)|(tmp);
++						break;
++					case 6:
++						out_buff[0]=((out[tmp_offset]&0x01)<<1)|tmp;
++						out_buff[0]|=((out[tmp_offset]&0x02)<<4)|(tmp<<4);
++						out_buff[1]=((out[tmp_offset]&0x04)>>1)|(tmp);
++						out_buff[1]|=((out[tmp_offset]&0x08)<<2)|(tmp<<4);
++						out_buff[2]=((out[tmp_offset]&0x10)>>3)|(tmp);
++						out_buff[2]|=((out[tmp_offset]&0x20))|(tmp<<4);
++						break;
++					case 7:
++						out_buff[0]=((out[tmp_offset]&0x01)<<1)|tmp;
++						out_buff[0]|=((out[tmp_offset]&0x02)<<4)|(tmp<<4);
++						out_buff[1]=((out[tmp_offset]&0x04)>>1)|(tmp);
++						out_buff[1]|=((out[tmp_offset]&0x08)<<2)|(tmp<<4);
++						out_buff[2]=((out[tmp_offset]&0x10)>>3)|(tmp);
++						out_buff[2]|=((out[tmp_offset]&0x20))|(tmp<<4);
++						out_buff[3]=((out[tmp_offset]&0x40)>>5)|(tmp);
++						break;
++					default:
++						LOG_ERROR("TMS len>8 for JTAG state machine error\n");
++						break;
++				}
++				cableserver_buffer_write(out_buff, 0, ((length+1)/2)*8);
++			}
++			
++			if(in){
++				if(!out){
++					memset(out_buff, 0x33, sizeof(unsigned char)*((length+1)/2));
++					cableserver_buffer_write(out_buff, 0, ((length+1)/2)*8);
++				}
++				cableserver_buffer_add_read(in, in_offset, in_bit_len);
++			}
++			
++			if(!out && !in){
++				memset(out_buff, 0x33, sizeof(unsigned char)*((length+1)/2));
++				cableserver_buffer_write(out_buff, 0,  ((length+1)/2)*8);
++			}
++				
++			length=0;
++			free(out_buff);
++			
++		}else{
++			unsigned this_bytes=length/8;
++			tmp_offset+=this_bytes;
++			if(this_bytes*8+3>MAX_BUFFER_SIZE)
++				this_bytes=MAX_BUFFER_SIZE; 	
++
++			if(this_bytes>0){
++				if(out){
++					//before call buffer write, need to convert data to bridge data
++					unsigned char *out_buff=NULL;
++					unsigned char tmp=0x01;
++					out_buff=(unsigned char *)malloc(sizeof(unsigned char)*(this_bytes*4));
++					memset(out_buff, 0, sizeof(unsigned char)*(this_bytes*4));
++					
++					for(unsigned int i=0; i<this_bytes; i++){
++						out_buff[i*4+0]=((out[out_offset+i]&0x01)<<1)|tmp;			
++						out_buff[i*4+0]|=((out[out_offset+i]&0x02)<<4)|(tmp<<4); 	
++						out_buff[i*4+1]=((out[out_offset+i]&0x04)>>1)|(tmp); 		
++						out_buff[i*4+1]|=((out[out_offset+i]&0x08)<<2)|(tmp<<4); 	
++						out_buff[i*4+2]=((out[out_offset+i]&0x10)>>3)|(tmp); 		
++						out_buff[i*4+2]|=((out[out_offset+i]&0x20))|(tmp<<4); 		
++						out_buff[i*4+3]=((out[out_offset+i]&0x40)>>5)|(tmp); 		
++						out_buff[i*4+3]|=((out[out_offset+i]&0x80)>>2)|(tmp<<4); 	
++					}
++					cableserver_buffer_write(out_buff, 0, this_bytes*8*4);
++					free(out_buff);
++				}
++
++				if(in){
++					if(!out){
++						unsigned char *out_buff=NULL;
++						out_buff=(unsigned char *)malloc(sizeof(unsigned char)*(this_bytes*4));
++						memset(out_buff, 0x33, sizeof(unsigned char)*(this_bytes*4));
++						
++						cableserver_buffer_write(out_buff, 0, this_bytes*8*4);
++						free(out_buff);
++					}
++
++					in_offset+=cableserver_buffer_add_read(in, in_offset, in_bit_len);
++				}
++				if(!out && !in){
++					unsigned char *out_buff=NULL;
++					out_buff=(unsigned char *)malloc(sizeof(unsigned char)*(this_bytes*4));
++					memset(out_buff, 0x33, sizeof(unsigned char)*(this_bytes*4));
++					
++					cableserver_buffer_write(out_buff, 0, this_bytes*8*4);
++					free(out_buff);
++				}
++				length-=this_bytes*8;
++			}
++		}
++	}
++	if(in){
++		cableserver_buffer_flush();
++	}
++}
++
++static void cableserver_tap_set_end_state(tap_state_t state){
++	if (tap_is_state_stable(state))
++		tap_set_end_state(state);
++	else {
++		LOG_ERROR("BUG: %s is not a stable end state", tap_state_name(state));
++		exit(-1);
++	}
++}
++
++static void cableserver_tap_move_to_state(tap_state_t goal_state){
++	tap_state_t start_state = tap_get_state();
++
++	/*	goal_state is 1/2 of a tuple/pair of states which allow convenient
++		lookup of the required TMS pattern to move to this state from the
++		start state.
++	*/
++
++	/* do the 2 lookups */
++	uint8_t tms_bits  = tap_get_tms_path(start_state, goal_state);
++	int tms_count = tap_get_tms_path_len(start_state, goal_state);
++	assert(tms_count <= 8);
++
++	DEBUG_JTAG_IO("start=%s goal=%s\n", tap_state_name(start_state), tap_state_name(goal_state));
++
++	/* Track state transitions step by step */
++	for (int i = 0; i < tms_count; i++)
++		tap_set_state(tap_state_transition(tap_get_state(), (tms_bits >> i) & 1));
++	
++	cableserver_clock_tms_cs_out(&tms_bits, 0, tms_count, false);
++}
++
++static void cableserver_execute_scan(struct jtag_command *cmd){
++	static bool first_run=true;
++	DEBUG_JTAG_IO("%s type:%d\n", cmd->cmd.scan->ir_scan ? "IRSCAN" : "DRSCAN", 
++		jtag_scan_type(cmd->cmd.scan));
++
++	/* Make sure there are no trailing fields with num_bits == 0, or the logic below will fail. */
++	while (cmd->cmd.scan->num_fields > 0
++			&& cmd->cmd.scan->fields[cmd->cmd.scan->num_fields - 1].num_bits == 0) {
++		cmd->cmd.scan->num_fields--;
++		DEBUG_JTAG_IO("discarding trailing empty field");
++	}
++
++	if (cmd->cmd.scan->num_fields == 0) {
++		DEBUG_JTAG_IO("empty scan, doing nothing");
++		return;
++	}
++#ifdef debug_on
++	int ir_flag=0;
++#endif
++	//int dr_flag=0;
++
++	if (cmd->cmd.scan->ir_scan) {
++		if (tap_get_state() != TAP_IRSHIFT)
++			cableserver_tap_move_to_state(TAP_IRSHIFT);
++			//fprintf(stderr, "IR shift\n");
++			//cmd_dr_flag=0;
++		//	ir_flag=1;
++	} else {
++		if (tap_get_state() != TAP_DRSHIFT)
++			cableserver_tap_move_to_state(TAP_DRSHIFT);
++			//fprintf(stderr,"DR shift\n");
++			//cmd_dr_flag=1;
++			//dr_flag=1;
++	}
++
++	cableserver_tap_set_end_state(cmd->cmd.scan->end_state);
++
++	struct scan_field *field = cmd->cmd.scan->fields;
++	unsigned scan_size = 0;
++	uint8_t *out_value=NULL;
++	uint8_t *in_value=NULL;
++	unsigned int dev_num=1;
++	
++#if 0 //SWWA for trailer
++	dev_num=daisy_chain_ctx->trailer_len;
++	//fprintf(stderr, "swwa deb_num=%d\n", dev_num);
++#endif
++
++#ifdef BRIDGE_4_BIT_UNIT
++//	if (cmd_dr_flag==1)
++		dev_num=daisy_chain_ctx->num;
++	//fprintf(stderr, "swwa deb_num=%d\n", dev_num);
++#endif
++	for (int i = 0; i < cmd->cmd.scan->num_fields; i++, field++) {
++		scan_size += field->num_bits;
++		DEBUG_JTAG_IO("%s%s field %d/%d %d bits",
++			field->in_value ? "in" : "", 
++			field->out_value ? "out" : "", 
++			i, 
++			cmd->cmd.scan->num_fields, 
++			field->num_bits);
++		
++		if (field->in_value){
++			//swwa: JTAG header and trailer in bypass mode, only 1 bit is needed, but in lattice JTAG, bridge need 4* bits, so 1 bit can not be passed to lattice jtag.
++			
++			in_value=calloc((field->num_bits*dev_num+7)/8, sizeof(unsigned char));
++			for (unsigned int in_i=0; in_i<dev_num; in_i++){
++				bit_copy(in_value,  field->num_bits*in_i, field->in_value, 0, field->num_bits);
++			}
++		}
++
++		if (field->out_value){
++			
++			out_value=calloc((field->num_bits*dev_num+7)/8, sizeof(unsigned char));
++			for (unsigned int out_i=0; out_i<dev_num; out_i++){
++				bit_copy(out_value,  field->num_bits*out_i, field->out_value, 0, field->num_bits);
++			}
++		}
++
++		if (first_run){
++			first_run=false;
++			cableserver_tap_move_to_state(TAP_RESET);  //rest to init tap id
++			cableserver_tap_move_to_state(TAP_IRSHIFT); //move to ir shift
++			unsigned char id_cmd[1]={0x01}; 				//switch to ID channel, bit_len is 4, first send 3 bit
++			cableserver_clock_data(id_cmd, 0, NULL, 0, 3, 0);
++			cableserver_tap_move_to_state(TAP_DRSHIFT);
++		}
++
++		if (i == cmd->cmd.scan->num_fields - 1 && tap_get_state() != tap_get_end_state()) {
++			/* Last field, and we're leaving IRSHIFT/DRSHIFT. Clock last bit during tap
++			 * movement. This last field can't have length zero, it was checked above. */
++			if (!(field->out_value) && !(field->in_value)&&(field->num_bits>0)){
++
++				uint8_t last_bit = 0;
++				uint8_t tmsbit=0x01;
++				cableserver_clock_data(NULL, 0, NULL, 0,  field->num_bits-1, 0);
++				cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, (last_bit==0x01) ? true : false, true);
++				#ifdef TAP_SWWA_1027
++					tap_set_state(tap_state_transition(tap_get_state(), 1));
++					tmsbit=0x00;
++					cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++					tap_set_state(tap_state_transition(tap_get_state(), 0));
++				#else
++					//	fprintf(stderr,"jtag 2 idle\n");
++					//set to idle
++					cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++					tmsbit=0x00;
++					cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++					tap_set_state(TAP_IDLE);
++				#endif
++			}
++			
++			if(field->in_value){
++				if(!(field->out_value)){
++					uint8_t last_bit = 1;
++					uint8_t tmsbit=0x01;
++					
++					cableserver_clock_data(in_value, 0, field->in_value, 0,  field->num_bits*(dev_num)-1, field->num_bits-1);
++					cableserver_clock_tms_cs(&tmsbit, 0, field->in_value, field->num_bits*(dev_num)-1, 1, (last_bit==0x01) ?  true : false, true);
++				//	fprintf(stderr,"jtag 2 idle\n");
++					//set to idle
++					#ifdef TAP_SWWA_1027
++						tap_set_state(tap_state_transition(tap_get_state(), 1));
++						tmsbit=0x00;
++						cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++						tap_set_state(tap_state_transition(tap_get_state(), 0));
++					#else
++						cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++						tmsbit=0x00;
++						cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++						tap_set_state(TAP_IDLE);	
++					#endif
++				}
++			}
++			
++			if (field->out_value){
++				uint8_t last_bit = 0;
++				uint8_t tmsbit=0x01;
++
++
++				cableserver_clock_data(out_value, 0, field->in_value, 0,  field->num_bits*(dev_num)-1, field->num_bits-1);
++				last_bit=((out_value[(field->num_bits*(dev_num)+7)/8-1])>>((((field->num_bits*(dev_num))%8-1)>0) ? ((field->num_bits*(dev_num))%8-1) : 0))&0x01;
++
++				cableserver_clock_tms_cs(&tmsbit, 0, field->in_value, field->num_bits*(dev_num)-1, 1, (last_bit==0x01) ? true: false, true);
++
++				#ifdef TAP_SWWA_1027
++					tap_set_state(tap_state_transition(tap_get_state(), 1));
++					tmsbit=0x00;
++					cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++					tap_set_state(tap_state_transition(tap_get_state(), 0));
++				#else
++					//set to idle
++					//fprintf(stderr,"jtag 2 idle\n");
++					cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++
++					tmsbit=0x00;
++					cableserver_clock_tms_cs(&tmsbit, 0, NULL, 0, 1, false, false);
++					tap_set_state(TAP_IDLE);	
++				#endif
++			}
++		} else{
++
++			if (!(field->out_value) && !(field->in_value) &&(field->num_bits>0))
++				cableserver_clock_data(NULL, 0, NULL, 0,  field->num_bits, 0);
++			
++			if(field->in_value){
++				if(!(field->out_value))
++					cableserver_clock_data(in_value, 0, field->in_value, 0,  field->num_bits*(dev_num), field->num_bits);
++			}
++			
++			if (field->out_value)
++				cableserver_clock_data(out_value, 0, field->in_value, 0,  field->num_bits*(dev_num), field->num_bits);
++		}		
++	}
++
++	if (tap_get_state() != tap_get_end_state())
++		 cableserver_tap_move_to_state(tap_get_end_state());
++
++	DEBUG_JTAG_IO("%s scan, %i bits, end in %s",(cmd->cmd.scan->ir_scan) ? "IR" : "DR",
++		scan_size,tap_state_name(tap_get_end_state()));
++}
++
++static void cableserver_execute_pathmove(struct jtag_command *cmd){
++	tap_state_t *path = cmd->cmd.pathmove->path;
++	int num_states  = cmd->cmd.pathmove->num_states;
++
++	DEBUG_JTAG_IO("pathmove: %i states, current: %s  end: %s", 
++		num_states,
++		tap_state_name(tap_get_state()),
++		tap_state_name(path[num_states-1]));
++
++	int state_count = 0;
++	unsigned bit_count = 0;
++	uint8_t tms_byte = 0;
++
++
++	/* this loop verifies that the path is legal and logs each state in the path */
++	while (num_states--) {
++
++		/* either TMS=0 or TMS=1 must work ... */
++		if (tap_state_transition(tap_get_state(), false) 
++			== path[state_count])
++			buf_set_u32(&tms_byte, bit_count++, 1, 0x0);
++		else if (tap_state_transition(tap_get_state(), true) 
++			== path[state_count]) {
++			buf_set_u32(&tms_byte, bit_count++, 1, 0x1);
++
++			/* ... or else the caller goofed BADLY */
++		} else {
++			LOG_ERROR("BUG: %s -> %s isn't a valid "
++				"TAP state transition",
++				tap_state_name(tap_get_state()),
++				tap_state_name(path[state_count]));
++			exit(-1);
++		}
++
++		tap_set_state(path[state_count]);
++		state_count++;
++
++		if (bit_count == 7 || num_states == 0) {
++			cableserver_clock_tms_cs_out(&tms_byte, 0, bit_count, false);
++			bit_count = 0;
++		}
++	}
++	tap_set_end_state(tap_get_state());
++}
++
++static void cableserver_execute_statemove(struct jtag_command *cmd)
++{
++	DEBUG_JTAG_IO("statemove end in %s",
++		tap_state_name(cmd->cmd.statemove->end_state));
++
++	cableserver_tap_set_end_state(cmd->cmd.statemove->end_state);
++
++	/* shortest-path move to desired end state */
++	if (tap_get_state() != tap_get_end_state() ||
++		tap_get_end_state() == TAP_RESET)
++		 cableserver_tap_move_to_state(tap_get_end_state());
++}
++
++static void cableserver_execute_stableclocks(struct jtag_command *cmd){
++	/* this is only allowed while in a stable state.  A check for a stable
++	 * state was done in jtag_add_clocks()
++	 */
++	int num_cycles = cmd->cmd.stableclocks->num_cycles;
++	/* 7 bits of either ones or zeros. */
++	uint8_t tms = tap_get_state() == TAP_RESET ? 0x7f : 0x00;
++	
++
++	/* TODO: Use mpsse_clock_data with in=out=0 for this, if TMS can be set to
++	 * the correct level and remain there during the scan */
++	while (num_cycles > 0) {
++		unsigned this_len = num_cycles > 7 ? 7 : num_cycles;
++		cableserver_clock_tms_cs_out(&tms, 0, this_len, false);
++		/* there are no state transitions in this code, so omit state tracking */
++		num_cycles -= this_len;
++	}
++
++	DEBUG_JTAG_IO("clocks %i while in %s",
++		cmd->cmd.stableclocks->num_cycles,
++		tap_state_name(tap_get_state()));
++
++}
++
++static void cableserver_execute_runtest(struct jtag_command *cmd){
++	int i;
++	uint8_t zero = 0;
++
++	DEBUG_JTAG_IO("runtest %i cycles, end in %s",
++		cmd->cmd.runtest->num_cycles,
++		tap_state_name(cmd->cmd.runtest->end_state));
++
++	if (tap_get_state() != TAP_IDLE)
++		 cableserver_tap_move_to_state(TAP_IDLE);
++
++	/* TODO: Reuse ftdi_execute_stableclocks */
++	i = cmd->cmd.runtest->num_cycles;
++	while (i > 0) {
++		/* there are no state transitions in this code, so omit state tracking */
++		unsigned this_len = i > 7 ? 7 : i;
++		cableserver_clock_tms_cs_out(&zero, 0, this_len, false);
++		i -= this_len;
++	}
++	cableserver_tap_set_end_state(cmd->cmd.runtest->end_state);
++
++	if (tap_get_state() != tap_get_end_state())
++		 cableserver_tap_move_to_state(tap_get_end_state());
++
++	DEBUG_JTAG_IO("runtest: %i, end in %s",
++		cmd->cmd.runtest->num_cycles,
++		tap_state_name(tap_get_end_state()));
++}
++
++static void cableserver_execute_reset(struct jtag_command *cmd){
++	DEBUG_JTAG_IO("reset trst: %i srst %i\n",
++		cmd->cmd.reset->trst, cmd->cmd.reset->srst);
++
++	if (cmd->cmd.reset->trst == 1
++	    || (cmd->cmd.reset->srst
++		&& (jtag_get_reset_config() & RESET_SRST_PULLS_TRST))){
++		tap_set_state(TAP_RESET);
++	}
++	 cableserver_tap_move_to_state(TAP_RESET);
++
++	DEBUG_JTAG_IO("trst: %i, srst: %i",
++		cmd->cmd.reset->trst, cmd->cmd.reset->srst);
++}
++
++static void cableserver_execute_sleep(struct jtag_command *cmd){
++	DEBUG_JTAG_IO("sleep %" PRIi32, cmd->cmd.sleep->us);
++	jtag_sleep(cmd->cmd.sleep->us);
++	DEBUG_JTAG_IO("sleep %" PRIi32 " usec while in %s",
++		cmd->cmd.sleep->us,
++		tap_state_name(tap_get_state()));
++}
++
++static void cableserver_execute_tms(struct jtag_command *cmd){
++	DEBUG_JTAG_IO("TMS: %d bits", cmd->cmd.tms->num_bits);
++}
++
++static void cableserver_execute_command(struct jtag_command *cmd){
++	switch (cmd->type) {
++			case JTAG_RESET:
++				cableserver_execute_reset(cmd);
++				break;
++			case JTAG_RUNTEST:
++				cableserver_execute_runtest(cmd);
++				break;
++			case JTAG_STABLECLOCKS:
++				cableserver_execute_stableclocks(cmd);
++				break;
++			case JTAG_TLR_RESET:
++				cableserver_execute_statemove(cmd);
++				break;
++			case JTAG_PATHMOVE:
++				cableserver_execute_pathmove(cmd);
++				break;
++			case JTAG_TMS:
++				cableserver_execute_tms(cmd);  
++				break;
++			case JTAG_SLEEP:
++				cableserver_execute_sleep(cmd); 
++				break;
++			case JTAG_SCAN:
++				cableserver_execute_scan(cmd);
++				break;
++			default:
++				break;	
++		}
++}
++
++static void cableserver_close(char *cable, char *port){
++	fprintf(stderr, "close\n");
++	if (cable_locked){
++		fprintf(stderr, "unlock\n");
++		if(cableserver_client_ctx->send(cableserver_client_ctx->handle, D_UnlockCable)!=0){
++			LOG_ERROR("lock cable failed\n");
++			return;
++		}
++		cable_locked=false;
++	}
++
++	if(cableserver_client_ctx->send(cableserver_client_ctx->handle, D_ReleaseCablePort, cable, port, 0) !=0){
++		LOG_ERROR("LSCC::release cable port failed\n");
++		return;
++	}
++
++	if(cableserver_client_ctx->send(cableserver_client_ctx->handle, D_DISCONNECT) !=0){
++		
++		return;
++	}
++}
++#ifdef _WIN32
++void set_cableserver_enviroment(void){
++	char str[1024+256];  //path+name
++	memset(str, '\0', 1024+256);
++	GetModuleFileNameA(NULL, str, 1024); //openOCD.exe path, include name
++
++   	
++	//set enviroment
++	strrchr(str, '\\')[1]=0;  //remove openOCD.exe name
++	char *path=strrchr(str, '\\')+1;
++
++	strcpy(path, "..\\..\\");
++	char toolRTF_path[1024+512]="TOOLRTF=";
++	strcpy(toolRTF_path+8, str);
++	//fprintf(stderr, "%s\n", toolRTF_path);
++	_putenv(toolRTF_path);
++	//const char* teststr=getenv("TOOLRTF");
++	//fprintf(stderr, "TEST::  %s\n", teststr);
++	
++	strcpy(path, "..\\..\\ispFPGA");
++	char foundry_path[1024+512]="FOUNDRY=";
++	strcpy(foundry_path+8, str);
++	//fprintf(stderr, "%s\n", foundry_path);
++   	_putenv(foundry_path);
++
++	//_putenv("LD_LIBRARY_PATH=C:\\lscc\\propel\\2.0_0325\\sdk\\ispfpga\\bin\\nt64;C:\\lscc\\propel\\2.0_0325\\sdk\\bin\\nt64;C:\\lscc\\propel\\2.0_0325\\sdk");
++	//system("set LD_LIBRARY_PATH=C:\\lscc\\propel\\2.0_0325\\sdk\\ispfpga\\bin\\nt64;C:\\lscc\\propel\\2.0_0325\\sdk\\bin\\nt64;C:\\lscc\\propel\\2.0_0325\\sdk");
++
++	
++	char *path1,*ptr;//, *ptr1;
++	ptr=getenv("PATH");
++	//fprintf(stderr,"%s\n",ptr);
++	path1=malloc(strlen(ptr)+1115);
++	strcpy(path1, "PATH=");
++	char str1[1024+256];  //path+name
++	memset(str1, '\0', 1024+256);
++	GetModuleFileNameA(NULL, str1, 1024); //openOCD.exe path, include name
++
++   	
++	//set enviroment
++	strrchr(str1, '\\')[1]=0;  //remove openOCD.exe name
++	strcat(path1, str1);
++	strcat(path1, "..\\..\\bin\\nt64;");
++	strcat(path1, ptr);
++	_putenv(path1);
++	//ptr1=getenv("PATH");
++	//fprintf(stderr,"%s\n",ptr1);
++
++	
++	
++}
++#endif
++struct cableserver_client_ctx *cableserver_open(void){
++#ifdef _WIN32
++	HINSTANCE handler_dll = NULL;
++	
++	struct cableserver_client_ctx *ctx=calloc(1, sizeof(*ctx));
++	if(!ctx)
++		return 0;
++
++	set_cableserver_enviroment();
++
++	char str[1024+256];  //path+name
++	memset(str, '\0', 1024+256);
++   	GetModuleFileNameA(NULL, str, 1024); //openOCD.exe path, include name
++   	strrchr(str, '\\')[1]=0;  //remove openOCD.exe name
++	char *path=strrchr(str, '\\')+1;
++
++	strcpy(path, "..\\..\\bin\\nt64\\cableserver_client.dll");
++	handler_dll = LoadLibrary(str);
++	if (handler_dll==NULL){
++		LOG_ERROR("load lib failed\n");
++		return NULL;
++	}
++
++	ctx->read_size=MAX_BUFFER_SIZE;
++	ctx->write_size=MAX_BUFFER_SIZE;
++	ctx->read_buffer=calloc(1, ctx->read_size);
++	ctx->write_buffer=calloc(1, ctx->write_size);
++	ctx->write_count=0;
++	ctx->read_count=0;
++	ctx->create=(client_create_func)GetProcAddress(handler_dll, "ClientCreate");
++	ctx->connect=(client_connect_func)GetProcAddress(handler_dll, "ClientConnect");
++	ctx->send=(client_send_func)GetProcAddress(handler_dll, "ClientSend");
++	ctx->read=(client_read_func)GetProcAddress(handler_dll, "ClientRead");
++#ifdef SIMULTANEOUSLY_DEBUGGING
++	ctx->read_int=(client_read_int_func)GetProcAddress(handler_dll, "ClientReadInt");
++#endif
++	ctx->get_tdo=(client_get_tdo_func)GetProcAddress(handler_dll, "ClientGetTDO");
++	ctx->get_tdo_u= (client_get_tdo_unsigned_func)GetProcAddress(handler_dll, "ClientGetTDO_U");
++	ctx->disconnect=(client_disconnect_func)GetProcAddress(handler_dll, "ClientDisConnect");
++	return ctx;
++#else //LIN64
++	
++	//void *handle = NULL;
++	struct cableserver_client_ctx *ctx=calloc(1, sizeof(*ctx));
++	if(!ctx)
++		return NULL;
++	//printf("open\n");
++	//get absotute path
++	#define PATH_MAX_SIZE 1024+256
++	char current_absolute_path[PATH_MAX_SIZE];
++	//printf("test0\n");
++	int cnt = readlink("/proc/self/exe", current_absolute_path, PATH_MAX_SIZE);
++	//printf("path=%s\n", current_absolute_path);
++	//int i=0;
++	//printf("test0.1\n");
++	if (cnt<0 || cnt>=PATH_MAX_SIZE){
++		//printf("0.2\n");
++		fprintf(stderr, "Error: can not get the absolute path ");
++		return NULL;
++	}
++	#if 0
++	for (i=cnt; i>=0; --i){
++		if (current_absolute_path[i] == '/'){
++			current_absolute_path[i+1] = '\0';
++			break;
++		}
++	} 
++	fprintf(stderr, "absolute path is: %s\n", current_absolute_path);
++	#endif
++	//printf("test1\n");
++	strrchr(current_absolute_path, '/')[1]=0;  //remove openOCD.exe name
++	//fprintf(stderr, "absolute path is: %s\n", current_absolute_path);
++	//printf("test2\n");
++	//set FOUNDRY PATH:  TBD
++	//.................
++	//..............
++
++	//load library
++	
++	char *lib_path=strrchr(current_absolute_path, '/')+1;
++	//printf("test3\n");
++	strcpy(lib_path, "../../bin/lin64/libcableserver_client.so.1.0.0");
++	//printf("start to open so lib\n");
++	//printf("so path is: %s\n", current_absolute_path);
++	void* handle = dlopen( current_absolute_path, RTLD_LAZY);
++	if (!handle){
++		//fprintf(stderr, "Error: can not load cableserver_client.so\n");
++		printf("dlopen error: %s\n", dlerror());
++		return NULL;
++	}
++	ctx->read_size=MAX_BUFFER_SIZE;
++	ctx->write_size=MAX_BUFFER_SIZE;
++	ctx->read_buffer=calloc(1, ctx->read_size);
++	ctx->write_buffer=calloc(1, ctx->write_size);
++	ctx->write_count=0;
++	ctx->read_count=0;
++	ctx->create=(client_create_func)dlsym(handle, "ClientCreate");
++	if (ctx->create==NULL){
++		printf("can not load so lib function handler\n");
++	}
++	ctx->connect=(client_connect_func)dlsym(handle, "ClientConnect");
++	ctx->send=(client_send_func)dlsym(handle, "ClientSend");
++	ctx->read=(client_read_func)dlsym(handle, "ClientRead");
++	ctx->get_tdo=(client_get_tdo_func)dlsym(handle, "ClientGetTDO");
++	ctx->get_tdo_u= (client_get_tdo_unsigned_func)dlsym(handle, "ClientGetTDO_U");
++#ifdef SIMULTANEOUSLY_DEBUGGING
++	ctx->read_int=(client_read_int_func)dlsym(handle, "ClientReadInt");
++#endif
++	ctx->disconnect=(client_disconnect_func)dlsym(handle, "ClientDisConnect");
++	//printf("open finish\n");
++	
++	return ctx;
++#endif
++	
++}
++
++int cableserver_config(void){
++	unsigned char er1_data[1]={0x32};  
++	//unsigned char select_channel[3]={0x00,0x00,0x16}; //selectTCRInstr, ecpENABLE, 21bit   //PROPEL 1.0 CHANNEL 0
++	//unsigned char select_channel[3]={0x04,0x00,0x06}; //selectTCRInstr, ecpENABLE, 24bit // PROPEL 1.1, JEDI CHANNEL 14
++	unsigned char er2_data[1]={0x38};
++	unsigned char enable_nop[2]={0x00, 0x00};
++	int dev_num=0;
++	int status;
++	unsigned char *cmd_data; 
++	#if 0
++	//device ID list
++	unsigned char dev_family=DEV_NONE;
++
++	fprintf(stderr, "name=%s, id=%s, len=%d, channel=%d\n", dev_family_config[0][0], dev_family_config[0][1], atoi(dev_family_config[0][2]), atoi(dev_family_config[0][3]));
++	char *JediID="0F1043";//"0x010F1043";
++	char *XO3DID="2E3043";//"0x212E3043";
++	char *ECP5ID="113043";//"0x41113043";
++	char *CertusNXID="0F1043";//"0x310F1043";
++	#endif
++	
++	daisy_chain_ctx=calloc(1, sizeof(struct daisy_chain_device_ctx));
++	daisy_chain_ctx->num=DC_DEV_NUM;
++	daisy_chain_ctx->target=atoi(lattice_target_dev);//DC_TARGET_DEVICE;
++	daisy_chain_ctx->trailer_len=0;
++	daisy_chain_ctx->header_len=0;
++	daisy_chain_ctx->HDR_len=0;
++	daisy_chain_ctx->HIR_len=0;
++	daisy_chain_ctx->TDR_len=0;
++	daisy_chain_ctx->TIR_len=0;
++	daisy_chain_ctx->HDR_data=NULL;
++	daisy_chain_ctx->HIR_data=NULL;
++	daisy_chain_ctx->TDR_data=NULL;
++	daisy_chain_ctx->TIR_data=NULL;
++
++	//create, connect cable
++	cableserver_client_ctx->handle=NULL;
++	cableserver_client_ctx->handle=cableserver_client_ctx->create(lattice_host_name);
++	if (cableserver_client_ctx->handle==NULL){
++		LOG_ERROR("Error:: client create failed\n");
++		return ERROR_FAIL;
++	}
++	//connect to cableserver,  create cableserver process to listen TCP/IP
++	if (cableserver_client_ctx->connect(cableserver_client_ctx->handle, lattice_host_name, NULL, NULL)!=0){
++		LOG_ERROR("Error:: connect to cableserver failed\n");
++		return ERROR_FAIL;
++	}
++
++	//fprintf(stderr, "daisy_chain_ctx->target=%d\n",daisy_chain_ctx->target);
++#ifdef SIMULTANEOUSLY_DEBUGGING
++	//send share cable 
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_SetSharableApplications, 2, "Reveal","Propel");
++	status=lockcable(cableserver_client_ctx->handle, true);
++	
++	if (status!=0){
++		fprintf(stderr,"lock cable failed!\n");
++		return ERROR_FAIL;
++	}
++	cable_locked=true;
++	//fprintf(stderr,"lock success\n");
++	
++#else
++	//set cable
++	//status=cableserver_client_ctx->send(cableserver_client_ctx->handle, D_SetCablePort, lattice_cable, lattice_port, 9,0,0,1,0,0,0,1,30,0);
++	status=cableserver_client_ctx->send(cableserver_client_ctx->handle, D_SetCablePort, lattice_cable, lattice_port, 9,0,0,1,0,0,0,1,atoi(lattice_tck_delay),0);
++	//status=cableserver_client_ctx->send(cableserver_client_ctx->handle, D_SetCablePort, lattice_cable, lattice_port, 0);
++	if(status <0){
++		LOG_ERROR("Set cable port failed(%d), Please select correct port number (FTUSB-?) from \'Cable List\'.",status);
++		//cableserver_client_ctx->client_disconnect(p_cableserver_client_ctx->p_client_handle);
++		//LOG_ERROR("set cable port failed(%d), please connect it again11\n",status);
++		return ERROR_FAIL;
++	}
++
++	if(cableserver_client_ctx->send(cableserver_client_ctx->handle, D_LockCable)!=0){
++		LOG_ERROR("Lock cable failed\n");
++		return ERROR_FAIL;
++	}
++
++	//cable_locked=true;
++	//fprintf(stderr,"lock success\n");
++#endif
++	//scan device
++	memset(dev_buff, '\0', 10*256);
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_ScanDeviceChain);
++	cableserver_client_ctx->read(cableserver_client_ctx->handle, dev_buff, &dev_num);
++	
++	#if 1
++	fprintf(stderr, "Device List: \n");
++	for (int i=0; i<dev_num; i++){
++		fprintf(stderr, "    ");
++		for (int j=0; j<100; j++){
++			fprintf(stderr, "%c", dev_buff[i][j]);
++			
++			#if 0
++			if (NULL!=strstr(dev_buff[i], JediID)){
++				dev_family |= DEV_JEDI;
++			}
++
++			if (NULL!= strstr(dev_buff[i], XO3DID)){
++				dev_family |= DEV_XO3D;
++			}
++
++			if (NULL!= strstr(dev_buff[i], ECP5ID)){
++				dev_family |= DEV_ECP5;
++			}
++
++			if (NULL!= strstr(dev_buff[i], CertusNXID)){
++				dev_family |= DEV_RAPTOR;
++			}
++			#endif
++		}
++		fprintf(stderr, "\n");
++	}
++	#endif
++
++	//fprintf(stderr,"target device name:%s\n", dev_buff[daisy_chain_ctx->target]);
++	if (NULL!=strstr(dev_buff[daisy_chain_ctx->target],"LFMNX-")){
++		daisy_chain_ctx->target++;
++	}
++#if 0
++	if (dev_family==DEV_NONE){
++		fprintf(stderr, "Error: Please select correct port number (FTUSB-?) ");
++		return ERROR_FAIL;
++	}
++#endif
++	daisy_chain_ctx->num=(unsigned int)dev_num;
++
++	daisy_chain_ctx->trailer_len=daisy_chain_ctx->num-daisy_chain_ctx->target-1;
++	daisy_chain_ctx->header_len=daisy_chain_ctx->target;
++
++	//fprintf(stderr, "info: dev num=%d, trailer_len =%d, header_len=%d\n", daisy_chain_ctx->num, daisy_chain_ctx->trailer_len, daisy_chain_ctx->header_len);
++	
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagTEST_LOGIC_RESET);
++	//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE); //XP: REMOVED for REVEAL first start
++
++	cmd_data=calloc(daisy_chain_ctx->num, sizeof(unsigned char));
++
++	//target JTAG ID read
++#if 0
++	unsigned char id_code=0xE0;  //JTAG ID cmd
++	unsigned char target_id[JTAG_ID_LEN];
++	unsigned char *id_list;
++	//unsigned char id_list[4*10]; //support 10 device in daisy chain.
++
++	id_list=calloc(JTAG_ID_LEN+(daisy_chain_ctx->num-1+7)/8, sizeof(unsigned char));
++	
++	memset(id_list, '\0', JTAG_ID_LEN+(daisy_chain_ctx->num-1+7)/8);
++	
++	memset(cmd_data, 0xFF, (daisy_chain_ctx->num)*sizeof(unsigned char));
++	cmd_data[daisy_chain_ctx->target]=id_code;
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_IR, 8*(daisy_chain_ctx->num), TDO_NO, cmd_data);
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, JTAG_ID_LEN*8+(daisy_chain_ctx->num-1), TDO_YES, id_list);
++	cableserver_client_ctx->get_tdo_u(cableserver_client_ctx->handle, id_list, JTAG_ID_LEN*8+daisy_chain_ctx->num-1);
++	//array len-trailer-idlen
++	for(int q=0; q<daisy_chain_ctx->trailer_len; q++)
++		bit_right_shift(id_list, JTAG_ID_LEN+(daisy_chain_ctx->num-1+7)/8);
++	bit_copy(target_id, 0, id_list, (daisy_chain_ctx->num-1+7)/8, JTAG_ID_LEN*8);
++	//unsigned src_offset=(JTAG_ID_LEN+(daisy_chain_ctx->num+7)/8)*8-(daisy_chain_ctx->trailer_len)-JTAG_ID_LEN*8;
++	//bit_copy(target_id, 0, id_list, src_offset, JTAG_ID_LEN*8);
++	
++	
++	
++	fprintf(stderr, "Target Device(%d) ID: 0x", daisy_chain_ctx->target);
++	for(int id_i=0; id_i<JTAG_ID_LEN; id_i++){
++		fprintf(stderr, "%02X", target_id[id_i]);
++	}
++	fprintf(stderr,"\n");
++	
++	#if 0
++	if (id_list[1]==0xff &&
++		id_list[2]==0xff&&
++		id_list[3]==0xff){
++		fprintf(stderr, "Error: Please select correct port number (FTUSB-?) from \'Cable List\'.");
++		return ERROR_FAIL;
++	}
++	#endif
++	free(id_list);
++#endif
++	
++	//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE);  //XP: REMOVED for REVEAL first start
++
++	//er1 configure
++	//er1 cmd
++	memset(cmd_data, 0xFF, (daisy_chain_ctx->num)*sizeof(unsigned char));
++	cmd_data[daisy_chain_ctx->target]=er1_data[0];
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_IR, 8*(daisy_chain_ctx->num), TDO_NO, cmd_data);
++	// cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE); //XP: REMOVED for REVEAL first start
++	//select channel
++	unsigned char *select_channel_data=NULL;
++	//unsigned char select_channel[ER2_SELECT_CHANNEL_CMD_LEN]={0x00,0x00,0x16};  //default ://selectTCRInstr, ecpENABLE, 21bit   //PROPEL 1.0 CHANNEL 0
++
++	unsigned char select_channel[ER2_SELECT_CHANNEL_CMD_LEN]={0x00,0x00,0x06};  //default ://selectTCRInstr, ecpENABLE, 21bit   //PROPEL 1.0 CHANNEL 0
++	//unsigned channel_data_bitlen=0;
++	#if 0
++	
++	if (DEV_JEDI == (dev_family&DEV_JEDI)){
++		select_channel[0]=0x04;
++		select_channel[1]=0x00;
++		select_channel[2]=0x06;
++		channel_data_bitlen=24; 
++		//unsigned char select_channel[3]={0x04,0x00,0x06}; //selectTCRInstr, ecpENABLE, 24bit // PROPEL 1.1, JEDI CHANNEL 14
++		//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, 24, TDO_NO, select_channel);
++		//fprintf(stderr, "jedi select channel\n");
++	}
++	else if (DEV_XO3D == (dev_family&DEV_XO3D) &&
++		DEV_RAPTOR != (dev_family&DEV_RAPTOR)){
++		select_channel[0]=0x00;
++		select_channel[1]=0x00;
++		select_channel[2]=0x16;
++		channel_data_bitlen=21;
++		//unsigned char select_channel[3]={0x00,0x00,0x16}; //selectTCRInstr, ecpENABLE, 21bit   //PROPEL 1.0 CHANNEL 0
++		//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, 21, TDO_NO, select_channel);
++		//fprintf(stderr, "sentry select channel\n");
++	}else if(DEV_RAPTOR == (dev_family&DEV_RAPTOR)){
++		select_channel[0]=0x04;
++		select_channel[1]=0x00;
++		select_channel[2]=0x06;
++		channel_data_bitlen=24;
++		//unsigned char select_channel[3]={0x04,0x00,0x06}; //selectTCRInstr, ecpENABLE, 24bit // PROPEL 1.1, JEDI CHANNEL 14
++		//if (daisy_chain_ctx->target==1){
++		//	unsigned char select_chnl_cmd[6]={0x00, 0x00, 0x00, 0x04,0x00,0x06};
++		//	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, 24*2, TDO_NO, select_chnl_cmd);
++		//}else{
++		//	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, 24, TDO_NO, select_channel);
++		//}//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, 24, TDO_NO, select_channel);
++		//fprintf(stderr, "Rapter select channel\n");
++	}else{
++		fprintf(stderr, "ERR: not support this device in lattice device family\n");
++		return ERROR_FAIL;
++	}
++#endif
++	int target_index=0;
++	for (target_index=0; target_index<DEV_FAMILY_NUM; target_index++){
++		if(NULL!= strstr(dev_buff[daisy_chain_ctx->target],  dev_family_config[target_index][1]))
++			break;
++	}
++
++	if (target_index>=DEV_FAMILY_NUM){
++		fprintf(stderr, "Err: can not found the device from device family database, use default value to access this device\n");
++		target_index=DEV_FAMILY_NUM-1;
++	}
++
++	//unsigned data_len=(channel_data_bitlen+daisy_chain_ctx->num-1+7)/8;  //minus self len bit 1
++	
++	unsigned data_len=(atoi(dev_family_config[target_index][2])+daisy_chain_ctx->num-1+7)/8;  //minus self len bit 1
++	//printf("data_len=%d\n", data_len);
++	select_channel_data=calloc(data_len, sizeof(unsigned char));
++	memset(select_channel_data, 0, data_len*sizeof(unsigned char));
++	
++
++
++	if (NULL == strstr(lattice_channel,"NA")){
++		memcpy(dev_family_config[target_index][3], lattice_channel, strlen(lattice_channel));
++		//dev_family_config[target_index][3]=lattice_channel;
++	}
++
++	//char tmp=0xff;
++	//bit_copy(select_channel, 19-atoi(dev_family_config[target_index][3]), &tmp, 0, 1); //set relative bit to 1 to set channel. 00000000 00000000 0000(chnnl 0) 0110
++	if (atoi(dev_family_config[target_index][3])<4)
++		select_channel[2] |= 0x01<<(4+atoi(dev_family_config[target_index][3]));
++
++	if (atoi(dev_family_config[target_index][3])>3 && atoi(dev_family_config[target_index][3])<12)
++		select_channel[1] |= 0x01<<(atoi(dev_family_config[target_index][3])-4);
++
++	if (atoi(dev_family_config[target_index][3])>11 && atoi(dev_family_config[target_index][3])<20)
++		select_channel[0] |= 0x01<<(atoi(dev_family_config[target_index][3])-12);
++
++	//fprintf(stderr,"0x%02x%02x%02x\n", select_channel[0],select_channel[1],select_channel[2]);
++	
++	//bit_copy(select_channel_data, (data_len-ER2_SELECT_CHANNEL_CMD_LEN)*8, select_channel, 0, ER2_SELECT_CHANNEL_CMD_LEN*8);
++	bit_copy(select_channel_data, (data_len-ER2_SELECT_CHANNEL_CMD_LEN)*8, select_channel, 0, ER2_SELECT_CHANNEL_CMD_LEN*8);
++	
++	
++		
++	for(unsigned int i=0; i<daisy_chain_ctx->trailer_len; i++){
++		bit_left_shift(select_channel_data, data_len);
++	}
++	//only copy last 3 byte to channel data
++	//bit_copy(select_channel_data, (data_len-ER2_SELECT_CHANNEL_CMD_LEN)*8, select_channel, 0, ER2_SELECT_CHANNEL_CMD_LEN*8);
++#if 0
++	fprintf(stderr, "select channel cmd: 0x");
++	for (int se_i=0; se_i<data_len; se_i++){
++		fprintf(stderr,"%02x", select_channel_data[se_i]);
++	}
++	fprintf(stderr, "\n");
++#endif
++	//printf("select channel data=0x%02x,%02x,%02x, %02x\n", select_channel_data[0],select_channel_data[1],select_channel_data[2], select_channel_data[3]);
++
++	//there is a bug. single xo3d CHIP should 21 bits
++	//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, channel_data_bitlen+daisy_chain_ctx->num-1, TDO_NO, select_channel_data);
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_DR, atoi(dev_family_config[target_index][2])+daisy_chain_ctx->num-1, TDO_NO, select_channel_data);
++	free(select_channel_data);
++
++	//set nop
++	// cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE);  //XP: REMOVED for REVEAL first start
++	memset(cmd_data, 0xFF, (daisy_chain_ctx->num)*sizeof(unsigned char));
++	cmd_data[daisy_chain_ctx->target]=enable_nop[0];
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_IR, 8*(daisy_chain_ctx->num), TDO_NO, enable_nop);
++	//cableserver_client_ctx->send(cableserver_client_ctx->handle, D_JumpState, jtagRUN_TEST_IDLE); //XP: REMOVED for REVEAL first start
++
++
++	//enable er2
++	//fprintf(stderr, "num=%d\n",daisy_chain_ctx->num);
++	memset(cmd_data, 0xFF, (daisy_chain_ctx->num)*sizeof(unsigned char));
++	cmd_data[daisy_chain_ctx->target]=er2_data[0];
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_Shift, SHI_IR, 8*(daisy_chain_ctx->num), TDO_NO, cmd_data);
++	
++	free(cmd_data);
++	return ERROR_OK;
++}
++
++void cableserver_proc_exit(void){ //WIN, kill process cableserver.exe
++#ifdef _WIN32
++#if 1
++	HANDLE process_list = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
++	PROCESSENTRY32 process_entry;
++	process_entry.dwSize = sizeof(PROCESSENTRY32);
++	//get the first process
++	if (false == Process32First(process_list, &process_entry))
++		return;
++	
++	while (Process32Next(process_list, &process_entry)){
++		if(strcmp(process_entry.szExeFile, "cableserver.exe") == 0){
++			uint32_t process_id = process_entry.th32ProcessID;
++			HANDLE process_handle = OpenProcess(PROCESS_TERMINATE|PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, process_id);
++
++			//if this cableserver is propel cableserver, will ignore it, or will kill it.
++			TerminateProcess(process_handle, 0);
++			CloseHandle(process_handle);
++			break;
++		}
++	}
++#else
++	HANDLE hSnap;
++	PROCESSENTRY32 pe;
++	hSnap=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
++
++	if (hSnap==INVALID_HANDLE_VALUE)
++ 		return;
++
++	pe.dwSize=sizeof(pe);
++	if (Process32First(hSnap, &pe))
++	{
++	    do
++	     {
++	         MODULEENTRY32 me;
++	         HANDLE hMod;
++	         if (pe.th32ProcessID==0)
++	             continue;
++
++	         hMod=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE,pe.th32ProcessID);
++	         if (hMod==INVALID_HANDLE_VALUE)
++	              continue;
++
++	         me.dwSize = sizeof(me);
++	         if (Module32First(hMod, &me)){
++	             //printf(" %-15s %s\n",me.szModule,me.szExePath);
++	             if (NULL!=strstr(me.szExePath, "cableserver.exe")){
++				if(NULL==strstr(me.szExePath, "propel")){
++					uint32_t process_id = pe.th32ProcessID;
++					HANDLE process_handle = OpenProcess(PROCESS_TERMINATE, false, process_id);
++					TerminateProcess(process_handle, 0);
++				} 
++			}
++		  }
++		  
++	         CloseHandle(hMod);
++	     } while (Process32Next(hSnap,&pe));
++	     CloseHandle(hSnap);
++	}
++	
++#endif
++#else //TBD
++	//linux kill process
++#endif
++
++}
++
++static int lscc_cableserver_execute_queue(void)
++{
++#ifdef SIMULTANEOUSLY_DEBUGGING
++	//lock cable
++	int status =0;
++	if (!cable_locked){
++		//fprintf(stderr, "cable is not in lock status, start to lock cable\n");
++		status=lockcable(cableserver_client_ctx->handle, false);
++		if (status!=0){
++			//fprintf(stderr," timeout lock cable failed!\n");
++			return ERROR_FAIL;
++		}else{
++			//fprintf(stderr, "lock success\n");
++			cable_locked=true;
++		}
++		//fprintf(stderr, "switch channel\n");
++		switch_JTAG_hub_channel();
++	}
++#endif
++	for (struct jtag_command *cmd = jtag_command_queue; cmd; cmd = cmd->next) {
++		/* fill the write buffer with the desired command */
++		cableserver_execute_command(cmd);
++	}
++
++	int retval = cableserver_buffer_flush();
++	
++#ifdef SIMULTANEOUSLY_DEBUGGING
++	//get unlock cable flag
++	//step1: send cmd D_UnlockCableNotify:57
++	int data =0;
++	//fprintf(stderr,"get unlock flag\n");
++	cableserver_client_ctx->send(cableserver_client_ctx->handle, D_UnlockCableNotify);
++	
++	//step2: read data from server
++	cableserver_client_ctx->read_int(cableserver_client_ctx->handle, &data);
++
++	//step3: unlock cable, set cable_locaked =false
++	//cable_locked=false; //mofidy client dll to make this path work
++	if (data==1){
++		//fprintf(stderr, "unlock cable\n");
++		cableserver_client_ctx->send(cableserver_client_ctx->handle, D_UnlockCable);
++		cable_locked=false;
++	}
++	
++#endif
++
++	if (retval != ERROR_OK)
++		LOG_ERROR("error while flushing MPSSE queue: %d", retval);
++	return retval;
++}
++
++static int lscc_cableserver_speed(int speed){
++	return ERROR_OK;
++}
++
++static int lscc_cableserver_khz(int khz, int *jtag_speed){
++	*jtag_speed = khz;
++	return ERROR_OK;
++}
++
++static int lscc_cableserver_speed_div(int speed, int *khz){
++	*khz = speed;
++	return ERROR_OK;
++}
++
++static int lscc_cableserver_init(void){
++	//cableserver_proc_exit();
++	cableserver_client_ctx= cableserver_open();
++	if (!cableserver_client_ctx)
++		return ERROR_JTAG_INIT_FAILED;
++	return cableserver_config();//isp tracy config  
++}
++
++static int lscc_cableserver_quit(void){
++	DEBUG_JTAG_IO("cableserver_quit");
++	cableserver_close("USB2", "FTUSB-0");
++	free(cableserver_client_ctx);
++	return ERROR_OK;
++}
++
++COMMAND_HANDLER(lattice_cable_server_info_command){
++	DEBUG_JTAG_IO("lattice cable server info version: RC1");
++	fprintf(stderr,"lattice driver version: 1.0.0.0\n");
++	return ERROR_OK;
++}
++
++COMMAND_HANDLER(lattice_cable_port_select_command){
++	DEBUG_JTAG_IO("lattice_cable_port_select_command");
++	lattice_port = strdup(CMD_ARGV[0]);
++	return ERROR_OK;
++}
++
++COMMAND_HANDLER(lattice_cable_target_dev_select_command){
++	DEBUG_JTAG_IO("lattice_cable_target_dev_select_command");
++	lattice_target_dev = strdup(CMD_ARGV[0]);
++	//fprintf(stderr, "lattice_target_dev=%s\n", lattice_target_dev);
++	return ERROR_OK;
++}
++
++COMMAND_HANDLER(lattice_cable_tck_delayt_command){
++	DEBUG_JTAG_IO("lattice_cable_tck_delayt_command");
++	lattice_tck_delay = strdup(CMD_ARGV[0]);
++	//fprintf(stderr, "lattice_tck_delay=%s\n", lattice_tck_delay);
++	return ERROR_OK;
++}
++
++COMMAND_HANDLER(lattice_cable_jtag_channel_command){
++	DEBUG_JTAG_IO("lattice_cable_jtag_channel_command");
++	lattice_channel = strdup(CMD_ARGV[0]);
++	//fprintf(stderr, "lattice_jtag_channel=%s\n", lattice_channel);
++	return ERROR_OK;
++}
++
++static const struct command_registration lscc_cableserver_cmd_handlers[] = {
++	{
++		.name = "lattice_driver_version",
++		.handler = lattice_cable_server_info_command,
++		.mode = COMMAND_CONFIG,
++		.help = "set the lattice cable description of the lattice driver",
++		.usage = "description-string",
++	},
++
++	//cable configuration
++	{
++		.name = "lattice_port_select",
++		.handler = lattice_cable_port_select_command,
++		.mode = COMMAND_CONFIG,
++		.help = "cable port select",
++		.usage = "vid pid vid_uninit pid_uninit",
++	},
++
++	{
++		.name = "lattice_target_dev_select",
++		.handler = lattice_cable_target_dev_select_command,
++		.mode = COMMAND_CONFIG,
++		.help = "cable target device select",
++		.usage = "vid pid vid_uninit pid_uninit",
++	},
++
++	{
++		.name = "lattice_tck_delay",
++		.handler = lattice_cable_tck_delayt_command,
++		.mode = COMMAND_CONFIG,
++		.help = "cable tck delay set",
++		.usage = "vid pid vid_uninit pid_uninit",
++	},
++
++	
++	{
++		.name = "lattice_jtaghub_channel_select",
++		.handler = lattice_cable_jtag_channel_command,
++		.mode = COMMAND_CONFIG,
++		.help = "cable jtag channel select",
++		.usage = "vid pid vid_uninit pid_uninit",
++	},
++	
++	COMMAND_REGISTRATION_DONE
++};
++
++//static const char * const lscc_transports[] = {"swd", "jtag", NULL};
++
++//************************lattice cableserver interface*************************************
++//
++//vexRiscV component==>lattice driver(JTAG logic, cableserver client logic, ispTracy logic, bridge logic)
++//==>cableserver==>ispTracy==>bridge==>JTAG==>debug module==>vexRiscV core
++//
++//*********************************end************************************************
++struct jtag_interface lscc_cableserver_interface = {
++	.name = "lattice-usb-cableserver",
++	.commands = lscc_cableserver_cmd_handlers,  
++	.transports = jtag_only,
++	.execute_queue = lscc_cableserver_execute_queue,
++	.speed = lscc_cableserver_speed,
++	.speed_div = lscc_cableserver_speed_div,
++	.khz = lscc_cableserver_khz,
++	.init = lscc_cableserver_init,
++	.quit = lscc_cableserver_quit,
++};
++
+diff --git a/src/jtag/interfaces.c b/src/jtag/interfaces.c
+index a26c8689b..e8e0a41a5 100644
+--- a/src/jtag/interfaces.c
++++ b/src/jtag/interfaces.c
+@@ -136,6 +136,9 @@ extern struct jtag_interface imx_gpio_interface;
+ #if BUILD_XDS110 == 1
+ extern struct jtag_interface xds110_interface;
+ #endif
++#if BUILD_LSCC_USB_CABLESERVER ==1
++extern struct jtag_interface lscc_cableserver_interface;
++#endif
+ #endif /* standard drivers */
+ 
+ /**
+@@ -242,6 +245,11 @@ struct jtag_interface *jtag_interfaces[] = {
+ #if BUILD_XDS110 == 1
+ 		&xds110_interface,
+ #endif
++
++#if BUILD_LSCC_USB_CABLESERVER ==1
++		&lscc_cableserver_interface,
++#endif
++
+ #endif /* standard drivers */
+ 		NULL,
+ 	};
+diff --git a/tcl/target/riscv-small.cfg b/tcl/target/riscv-small.cfg
+new file mode 100644
+index 000000000..88060e333
+--- /dev/null
++++ b/tcl/target/riscv-small.cfg
+@@ -0,0 +1,32 @@
++interface dummy
++
++set  _ENDIAN little
++set _TAP_TYPE 1234
++
++if { [info exists CPUTAPID] } {
++   set _CPUTAPID $CPUTAPID
++} else {
++  # set useful default
++   set _CPUTAPID 0x10001fff 
++}
++
++adapter_khz 4000
++adapter_nsrst_delay 260
++jtag_ntrst_delay 250
++
++set _CHIPNAME fpga_spinal
++jtag newtap $_CHIPNAME bridge -expected-id $_CPUTAPID -irlen 4 -ircapture 0x1 -irmask 0xF 
++
++target create $_CHIPNAME.cpu0 vexriscv -endian $_ENDIAN -chain-position $_CHIPNAME.bridge -coreid 0 -dbgbase 0xF00F0000
++#target create $_CHIPNAME.cpu0 vexriscv -endian $_ENDIAN -chain-position $_CHIPNAME.bridge -coreid 0 -dbgbase 0x00000000
++vexriscv readWaitCycles 12
++vexriscv cpuConfigFile $RISCV_SMALL_YAML
++
++
++poll_period 50
++
++
++
++init
++#echo "Halting processor"
++#soft_reset_halt
